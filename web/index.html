@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vision Bot Console</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- HEADER -->
+        <header class="app-header">
+            <div class="logo-area">
+                <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+                    <path d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7Z" />
+                </svg>
+                <div class="logo-text">
+                    <h1>Vision<span>Bot</span></h1>
+                    <p>IA + OCR Solver</p>
+                </div>
+            </div>
+
+            <!-- STATUS INDICATORS -->
+            <div class="status-indicators">
+                <div class="status-pill" id="status-ollama">
+                    <span class="indicator red"></span>
+                    <span class="text">Ollama: Offline</span>
+                </div>
+                <div class="status-pill" id="status-tesseract">
+                    <span class="indicator red"></span>
+                    <span class="text">Tesseract: Offline</span>
+                </div>
+                <div class="status-pill" id="status-loop">
+                    <span class="indicator gray"></span>
+                    <span class="text">Bucle: Off</span>
+                </div>
+                <button class="cmd-k-trigger" id="btn-cmdk-trigger" title="Abrir barra de comandos (Ctrl+K)">
+                    <kbd>Ctrl</kbd> + <kbd>K</kbd>
+                </button>
+            </div>
+        </header>
+
+        <!-- MAIN LAYOUT -->
+        <main class="app-main">
+            <!-- SIDEBAR: SETTINGS -->
+            <aside class="settings-sidebar">
+                <div class="sidebar-card">
+                    <div class="card-header">
+                        <h2>Configuración</h2>
+                    </div>
+                    <form id="config-form" class="sidebar-form" onsubmit="event.preventDefault();">
+                        <div class="form-group">
+                            <label for="ollama_host">Ollama API Host</label>
+                            <input type="text" id="ollama_host" name="ollama_host" placeholder="http://localhost:11434">
+                        </div>
+
+                        <div class="form-group">
+                            <label for="model">Modelo Ollama</label>
+                            <div class="select-wrapper">
+                                <select id="model" name="model">
+                                    <option value="llama3.1">llama3.1</option>
+                                    <option value="mistral">mistral</option>
+                                </select>
+                                <button type="button" class="btn-icon-refresh" id="btn-refresh-models" title="Actualizar modelos">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="lang">Idioma OCR</label>
+                                <input type="text" id="lang" name="lang" placeholder="spa+eng">
+                            </div>
+                            <div class="form-group">
+                                <label for="psm">Modo PSM</label>
+                                <select id="psm" name="psm">
+                                    <option value="3">3 - Auto</option>
+                                    <option value="4">4 - Asumir columnas</option>
+                                    <option value="6" selected>6 - Bloque uniforme (Defecto)</option>
+                                    <option value="11">11 - Buscar texto disperso</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="tesseract_cmd">Ruta Tesseract exe</label>
+                            <input type="text" id="tesseract_cmd" name="tesseract_cmd" placeholder="C:\Program Files\Tesseract-OCR\tesseract.exe">
+                        </div>
+
+                        <hr class="divider">
+
+                        <div class="form-group">
+                            <label>Configuración de Acción</label>
+                            
+                            <label class="switch-container">
+                                <span class="switch-label">Habilitar clic automático</span>
+                                <input type="checkbox" id="click" name="click" checked>
+                                <span class="switch-slider"></span>
+                            </label>
+
+                            <label class="switch-container">
+                                <span class="switch-label">Confirmar antes de hacer clic</span>
+                                <input type="checkbox" id="confirm" name="confirm">
+                                <span class="switch-slider"></span>
+                            </label>
+
+                            <label class="switch-container warning">
+                                <span class="switch-label">Modo seguro (Clic real desactivado)</span>
+                                <input type="checkbox" id="safe_mode" name="safe_mode">
+                                <span class="switch-slider"></span>
+                            </label>
+
+                            <label class="switch-container">
+                                <span class="switch-label">Simular scroll tras responder</span>
+                                <input type="checkbox" id="auto_scroll" name="auto_scroll">
+                                <span class="switch-slider"></span>
+                            </label>
+                        </div>
+
+                        <div class="form-group">
+                            <div class="slider-header">
+                                <label for="min_click_score">Score mínimo de coincidencia</label>
+                                <span class="slider-value" id="val-min-click-score">0.58</span>
+                            </div>
+                            <input type="range" id="min_click_score" name="min_click_score" min="0.1" max="1.0" step="0.05" value="0.58">
+                        </div>
+
+                        <div class="form-group">
+                            <div class="slider-header">
+                                <label for="interval">Intervalo de bucle (s)</label>
+                                <span class="slider-value" id="val-interval">3.0s</span>
+                            </div>
+                            <input type="range" id="interval" name="interval" min="1.0" max="15.0" step="0.5" value="3.0">
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group flex-1">
+                                <label for="scroll_amount">Cantidad de Scroll</label>
+                                <input type="number" id="scroll_amount" name="scroll_amount" value="-300" step="50" style="background: rgba(0,0,0,0.25); border: 1px solid var(--border-color); border-radius: 8px; padding: 0.6rem; color: var(--text-primary); font-family: var(--font-body); font-size: 0.85rem; outline: none; width: 100%;">
+                            </div>
+                            <div class="form-group flex-1">
+                                <label for="scroll_delay">Espera scroll (s)</label>
+                                <input type="number" id="scroll_delay" name="scroll_delay" value="1.0" step="0.1" style="background: rgba(0,0,0,0.25); border: 1px solid var(--border-color); border-radius: 8px; padding: 0.6rem; color: var(--text-primary); font-family: var(--font-body); font-size: 0.85rem; outline: none; width: 100%;">
+                            </div>
+                        </div>
+
+                        <button type="submit" class="btn-primary" id="btn-save-config">Guardar Configuración</button>
+                    </form>
+                </div>
+            </aside>
+
+            <!-- CENTER/RIGHT GRID -->
+            <div class="dashboard-grid">
+                
+                <!-- SCREEN VIEWER -->
+                <section class="viewer-card">
+                    <div class="card-header">
+                        <h2>Visor de Pantalla</h2>
+                        <div class="viewer-actions">
+                            <button class="btn-secondary btn-small" id="btn-toggle-viewer" style="display: none;">Ver Pantalla</button>
+                            <span class="region-badge" id="region-badge">Región: Completa</span>
+                            <button class="btn-secondary btn-small" id="btn-clear-region" title="Limpiar región seleccionada">Limpiar Región</button>
+                            <button class="btn-secondary btn-small" id="btn-capture" title="Tomar captura de pantalla fresca">Capturar Pantalla</button>
+                        </div>
+                    </div>
+                    <div class="viewer-body">
+                        <div class="canvas-container" id="canvas-container">
+                            <div class="no-capture-overlay" id="no-capture-overlay">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="placeholder-icon">
+                                    <rect width="20" height="14" x="2" y="3" rx="2"/>
+                                    <line x1="12" x2="12" y1="17" y2="21"/>
+                                    <line x1="8" x2="16" y1="21" y2="21"/>
+                                </svg>
+                                <p>No hay capturas disponibles. Haz clic en "Capturar Pantalla" para iniciar.</p>
+                            </div>
+                            <canvas id="screenshot-canvas"></canvas>
+                            <div class="drag-hint">
+                                <span class="icon">🖱️</span> Arrastra para definir una región de captura.
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- INTERACTION ACTIONS -->
+                <section class="actions-panel">
+                    <button class="btn-action pulse" id="btn-run-once">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                        Ejecutar Solver Una Vez
+                    </button>
+                    <button class="btn-action success" id="btn-start-loop">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                        Iniciar Bucle Continuo
+                    </button>
+                    <button class="btn-action danger" id="btn-stop-loop" disabled>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/></svg>
+                        Detener Bucle
+                    </button>
+                </section>
+
+                <!-- RESULTS / DETAILS VIEW -->
+                <section class="details-card">
+                    <div class="card-header">
+                        <h2>Análisis del Bot</h2>
+                    </div>
+                    <div class="details-body">
+                        <div class="details-group">
+                            <h3>Pregunta Extraída</h3>
+                            <div class="value-box font-heading" id="result-question">[Ninguna pregunta analizada aún]</div>
+                        </div>
+
+                        <div class="details-row">
+                            <div class="details-group flex-1">
+                                <h3>Opciones Detectadas</h3>
+                                <ul class="options-list" id="result-options">
+                                    <li class="placeholder">Sin opciones detectadas</li>
+                                </ul>
+                            </div>
+                            
+                            <div class="details-group flex-1">
+                                <h3>Respuesta Seleccionada por IA</h3>
+                                <div class="ai-answer-box" id="ai-answer-box">
+                                    <div class="answer-main">
+                                        <span class="answer" id="result-answer">-</span>
+                                        <span class="confidence-badge" id="result-confidence">0%</span>
+                                    </div>
+                                    <div class="reason" id="result-reason">-</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="details-group">
+                            <h3>Plan de Clic</h3>
+                            <div class="click-plan-box" id="click-plan-box">
+                                <div class="plan-details">
+                                    <div><strong>Texto Objetivo:</strong> <span id="plan-text">-</span></div>
+                                    <div><strong>Coordenadas:</strong> <span id="plan-coords">-</span></div>
+                                    <div><strong>Score de Similitud:</strong> <span id="plan-score">-</span></div>
+                                    <div><strong>Modo:</strong> <span id="plan-mode">-</span></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- REAL-TIME CONSOLE LOGS -->
+                <section class="console-card">
+                    <div class="card-header">
+                        <h2>Consola de Actividad (WebSockets)</h2>
+                        <button class="btn-text" id="btn-clear-console">Limpiar Consola</button>
+                    </div>
+                    <div class="console-body" id="console-output">
+                        <div class="log-line system">Iniciando consola de Vision Bot...</div>
+                    </div>
+                </section>
+
+            </div>
+        </main>
+    </div>
+
+    <!-- FLOATING PENDING CONFIRM MODAL -->
+    <div class="modal-overlay" id="confirm-modal">
+        <div class="confirm-modal-box">
+            <div class="modal-header warning">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="modal-icon"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" x2="12" y1="9" y2="13"/><line x1="12" x2="12.01" y1="17" y2="17"/></svg>
+                <h2>Confirmación de Clic Requerida</h2>
+            </div>
+            <div class="modal-body">
+                <p>El solucionador ha seleccionado una opción y el plan de clic está listo:</p>
+                <div class="modal-plan-details">
+                    <div><strong>Opción elegida:</strong> <span id="modal-plan-text">-</span></div>
+                    <div><strong>Coordenadas:</strong> <span id="modal-plan-coords">-</span></div>
+                    <div><strong>Score del OCR:</strong> <span id="modal-plan-score">-</span></div>
+                </div>
+                <p class="modal-warning-text">¿Deseas autorizar al bot para que mueva el cursor y haga clic en la pantalla?</p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-secondary" id="btn-modal-cancel">Rechazar clic</button>
+                <button class="btn-primary" id="btn-modal-approve">Aprobar y Ejecutar clic</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- COMMAND BAR DIALOG (CMD+K) -->
+    <dialog class="command-bar-dialog" id="command-bar-dialog">
+        <div class="command-bar-container">
+            <div class="command-bar-search">
+                <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+                </svg>
+                <input type="text" id="cmd-input" placeholder="Escribe un comando o busca opciones..." autocomplete="off">
+                <button class="close-cmd-bar" id="btn-close-cmd-bar">Esc</button>
+            </div>
+            <div class="command-bar-results" id="cmd-results">
+                <!-- Will be populated dynamically by JS -->
+            </div>
+            <div class="command-bar-footer">
+                <span><kbd>↑↓</kbd> Navegar</span>
+                <span><kbd>Enter</kbd> Ejecutar</span>
+                <span><kbd>Esc</kbd> Cerrar</span>
+            </div>
+        </div>
+    </dialog>
+</body>
+</html>

@@ -1,0 +1,11 @@
+# Direct runtime dependencies. Keep requirements.txt locked for installs.
+pillow
+pytesseract
+opencv-python
+numpy
+pyautogui
+requests
+fastapi
+uvicorn
+websockets
+pydantic

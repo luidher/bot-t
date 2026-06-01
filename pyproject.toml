@@ -1,0 +1,20 @@
+[project]
+name = "vision-bot"
+version = "0.1.0"
+description = "Bot local de vision, OCR y Ollama para demos autorizadas."
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "pillow==12.2.0",
+    "pytesseract==0.3.13",
+    "opencv-python==4.13.0.92",
+    "numpy==2.4.5",
+    "pyautogui==0.9.54",
+    "requests==2.34.2",
+    "fastapi==0.136.3",
+    "uvicorn==0.48.0",
+    "websockets==16.0",
+    "pydantic==2.13.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

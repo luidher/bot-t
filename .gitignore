@@ -1,0 +1,35 @@
+# Python environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python cache and build output
+__pycache__/
+*/__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Test, coverage, and tooling cache
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Local runtime artifacts
+screenshots/*.png
+debug/
+web_config.json
+*.log
+
+# Local secrets and machine-specific editor files
+.env
+.env.*
+.vscode/
+.idea/
