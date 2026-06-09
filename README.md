@@ -50,6 +50,24 @@ al PATH.
 Tambien puedes usar `iniciar_web.bat`; el script detecta si `venv` esta roto,
 lo recrea y reinstala las dependencias bloqueadas.
 
+Para revisar una PC nueva antes de instalar dependencias, ejecuta:
+
+```powershell
+.\setup_windows.ps1 -DiagnosticsOnly
+```
+
+Para validar requisitos y preparar el entorno virtual:
+
+```powershell
+.\setup_windows.ps1
+```
+
+Opcionalmente puedes indicar otro modelo o ruta de Tesseract:
+
+```powershell
+.\setup_windows.ps1 -Model mistral -TesseractPath "C:\Program Files\Tesseract-OCR\tesseract.exe"
+```
+
 ## Pruebas
 
 ```powershell

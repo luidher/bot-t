@@ -9,3 +9,6 @@ fastapi
 uvicorn
 websockets
 pydantic
+PyQt5
+playwright
+

@@ -103,3 +103,9 @@ def _similarity(left: str, right: str) -> float:
 
 def _normalize(value: str) -> str:
     return " ".join(value.lower().strip().split())
+
+
+def execute_playwright_click(browser, selector: str) -> None:
+    """Clic por selector CSS usando Playwright. browser es una instancia de BotBrowser."""
+    browser.click_option(selector)
+

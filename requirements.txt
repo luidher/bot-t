@@ -32,3 +32,6 @@ typing-inspection==0.4.2
 urllib3==2.7.0
 uvicorn==0.48.0
 websockets==16.0
+PyQt5==5.15.10
+playwright==1.44.0
+

@@ -1,0 +1,29 @@
+{
+    "mode": "playwright",
+    "url": "https://pruebat.org/",
+    "model": "llama3.1",
+    "ollama_host": "http://localhost:11434",
+    "lang": "spa+eng",
+    "psm": 6,
+    "no_preprocess": false,
+    "region": [
+        661,
+        269,
+        1159,
+        679
+    ],
+    "click": true,
+    "confirm": false,
+    "i_am_authorized": true,
+    "min_click_score": 0.58,
+    "interval": 3.0,
+    "max_pages": 50,
+    "auto_next": true,
+    "next_wait_sec": 2.0,
+    "pw_timeout_ms": 10000,
+    "pw_headless": false,
+    "tesseract_cmd": "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+    "auto_scroll": false,
+    "scroll_amount": -300,
+    "scroll_delay": 1.0
+}

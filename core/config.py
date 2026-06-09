@@ -1,30 +1,62 @@
+"""Centralized configuration dataclass and Pydantic validation for Vision Bot v2."""
 from __future__ import annotations
 
-from typing import Any
-
+import json
+from pathlib import Path
+from typing import Any, Optional, Tuple
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+CONFIG_FILE = Path("widget_config.json")
+
+Region = Tuple[int, int, int, int]
 
 
 class BotConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Operating mode
+    mode: str = Field(default="vision")                # "vision" | "playwright"
+
+    # Target
+    url: str = Field(default="")                       # Used in playwright mode
+
+    # Ollama / AI
     model: str = Field(default="llama3.1", min_length=1, max_length=120)
     ollama_host: str = Field(default="http://localhost:11434", min_length=1, max_length=300)
+
+    # OCR (vision mode)
     lang: str = Field(default="spa+eng", min_length=1, max_length=80)
     psm: int = Field(default=6, ge=0, le=13)
-    region: tuple[int, int, int, int] | None = None
     no_preprocess: bool = False
+    region: Optional[tuple[int, int, int, int]] = None
+
+    # Click behaviour
     click: bool = True
     confirm: bool = False
     i_am_authorized: bool = True
     min_click_score: float = Field(default=0.58, ge=0.0, le=1.0)
+
+    # Loop timing
     interval: float = Field(default=3.0, ge=0.2, le=3600.0)
+
+    # Multi-page settings
+    max_pages: int = Field(default=50, ge=1)
+    auto_next: bool = True
+    next_wait_sec: float = Field(default=2.0, ge=0.0, le=60.0)
+
+    # Playwright settings
+    pw_timeout_ms: int = Field(default=10000, ge=0)
+    pw_headless: bool = False           # False = browser visible
+
+    # Tesseract path (vision mode)
     tesseract_cmd: str = Field(default=r"C:\Program Files\Tesseract-OCR\tesseract.exe", max_length=500)
+
+    # Scroll behaviour
     auto_scroll: bool = False
     scroll_amount: int = Field(default=-300, ge=-10000, le=10000)
     scroll_delay: float = Field(default=1.0, ge=0.0, le=60.0)
 
-    @field_validator("model", "ollama_host", "lang", "tesseract_cmd", mode="before")
+    @field_validator("model", "ollama_host", "lang", "tesseract_cmd", "url", mode="before")
     @classmethod
     def _strip_text(cls, value: Any) -> Any:
         return value.strip() if isinstance(value, str) else value
@@ -47,27 +79,70 @@ class BotConfig(BaseModel):
 
         return self
 
+    def save(self) -> None:
+        """Persist config to JSON file."""
+        try:
+            data = self.model_dump(mode="json")
+            with open(CONFIG_FILE, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=4, ensure_ascii=False)
+        except Exception as exc:  # pragma: no cover
+            print(f"[CONFIG] Error al guardar: {exc}")
+
+    @classmethod
+    def load(cls) -> "BotConfig":
+        """Load config from JSON file, falling back to defaults."""
+        if not CONFIG_FILE.exists():
+            return cls()
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            # Only keep keys that exist in the model fields
+            valid_keys = set(cls.model_fields.keys())
+            filtered = {k: v for k, v in data.items() if k in valid_keys}
+            return cls.model_validate(filtered)
+        except Exception as exc:  # pragma: no cover
+            print(f"[CONFIG] Error al cargar, usando defaults: {exc}")
+            return cls()
+
+    def ensure_http(self) -> str:
+        """Return ollama_host guaranteed to have http:// prefix."""
+        host = self.ollama_host.strip()
+        if not host.startswith(("http://", "https://")):
+            host = "http://" + host
+        return host.rstrip("/")
+
 
 class BotConfigUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    model: str | None = Field(default=None, min_length=1, max_length=120)
-    ollama_host: str | None = Field(default=None, min_length=1, max_length=300)
-    lang: str | None = Field(default=None, min_length=1, max_length=80)
-    psm: int | None = Field(default=None, ge=0, le=13)
-    region: tuple[int, int, int, int] | None = None
-    no_preprocess: bool | None = None
-    click: bool | None = None
-    confirm: bool | None = None
-    i_am_authorized: bool | None = None
-    min_click_score: float | None = Field(default=None, ge=0.0, le=1.0)
-    interval: float | None = Field(default=None, ge=0.2, le=3600.0)
-    tesseract_cmd: str | None = Field(default=None, max_length=500)
-    auto_scroll: bool | None = None
-    scroll_amount: int | None = Field(default=None, ge=-10000, le=10000)
-    scroll_delay: float | None = Field(default=None, ge=0.0, le=60.0)
+    mode: Optional[str] = None
+    url: Optional[str] = None
+    model: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    ollama_host: Optional[str] = Field(default=None, min_length=1, max_length=300)
+    lang: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    psm: Optional[int] = Field(default=None, ge=0, le=13)
+    region: Optional[tuple[int, int, int, int]] = None
+    no_preprocess: Optional[bool] = None
+    click: Optional[bool] = None
+    confirm: Optional[bool] = None
+    i_am_authorized: Optional[bool] = None
+    min_click_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    interval: Optional[float] = Field(default=None, ge=0.2, le=3600.0)
+    tesseract_cmd: Optional[str] = Field(default=None, max_length=500)
+    auto_scroll: Optional[bool] = None
+    scroll_amount: Optional[int] = Field(default=None, ge=-10000, le=10000)
+    scroll_delay: Optional[float] = Field(default=None, ge=0.0, le=60.0)
 
-    @field_validator("model", "ollama_host", "lang", "tesseract_cmd", mode="before")
+    # Multi-page settings
+    max_pages: Optional[int] = Field(default=None, ge=1)
+    auto_next: Optional[bool] = None
+    next_wait_sec: Optional[float] = Field(default=None, ge=0.0, le=60.0)
+
+    # Playwright settings
+    pw_timeout_ms: Optional[int] = Field(default=None, ge=0)
+    pw_headless: Optional[bool] = None
+
+    @field_validator("model", "ollama_host", "lang", "tesseract_cmd", "url", mode="before")
     @classmethod
     def _strip_text(cls, value: Any) -> Any:
         return value.strip() if isinstance(value, str) else value

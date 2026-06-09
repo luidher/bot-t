@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 
 
@@ -12,10 +12,23 @@ class ParsedQuestion:
     question: str
     options: list[str]
     raw_lines: list[str]
+    selectors: list[str] = field(default_factory=list)
 
     @property
     def has_options(self) -> bool:
         return len(self.options) > 0
+
+    @classmethod
+    def from_dom(cls, data: dict) -> "ParsedQuestion":
+        """Construye un ParsedQuestion desde los datos extraídos del DOM.
+
+        data = {"question": str, "options": list[str], "selectors": list[str]}
+        """
+        question = str(data.get("question", "")).strip()
+        options = [str(o).strip() for o in data.get("options", []) if str(o).strip()]
+        selectors = [str(s).strip() for s in data.get("selectors", []) if str(s).strip()]
+        raw_lines = [question] + options
+        return cls(question=question, options=options, raw_lines=raw_lines, selectors=selectors)
 
 
 def parse_question(text: str) -> ParsedQuestion:

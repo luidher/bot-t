@@ -9,10 +9,12 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from core.actions import execute_click, plan_click_for_answer
+from core.actions import execute_click, plan_click_for_answer, execute_playwright_click
 from core.ai import OllamaClient
 from core.config import BotConfig, BotConfigUpdate, default_config_dict, merge_config
-from core.parser import parse_question
+from core.parser import parse_question, ParsedQuestion
+from core.browser import BotBrowser
+from core.page_manager import PageManager
 
 CONFIG_FILE = Path("web_config.json")
 
@@ -34,10 +36,14 @@ class BotRunner:
         self.config_file = config_file
         self.event_callback = event_callback
         self.loop_active = False
+        self.paused = False
         self.pending_click_plan = None
         self.config = default_config_dict()
         self.last_run_info: dict[str, Any] = {}
         self._thread: threading.Thread | None = None
+
+        self.browser: BotBrowser | None = None
+        self.page_manager: PageManager | None = None
 
         self.load_config()
         self.apply_tesseract_path()
@@ -104,12 +110,23 @@ class BotRunner:
             "ollama_models": models,
             "tesseract_available": tess_ok,
             "loop_running": self.loop_active,
+            "paused": self.paused,
             "pending_confirm": self.pending_click_plan is not None,
             "config": self.config,
             "last_run": self.last_run_info,
         }
 
     def execute_scroll_action(self, amount: int | None = None) -> None:
+        if self.config.get("mode") == "playwright" and self.browser and self.browser.page:
+            scroll_val = amount if amount is not None else self.config.get("scroll_amount", 300)
+            self.log(f"Simulando scroll de {scroll_val} px en Playwright...", "INFO")
+            try:
+                self.browser.page.evaluate(f"window.scrollBy(0, {scroll_val})")
+                self.log("Scroll completado.", "SUCCESS")
+            except Exception as e:
+                self.log(f"Error al simular scroll en Playwright: {e}", "ERROR")
+            return
+
         import pyautogui
 
         scroll_val = amount if amount is not None else self.config.get("scroll_amount", -300)
@@ -169,10 +186,151 @@ class BotRunner:
         return str(capture.path)
 
     def run_once(self) -> dict[str, Any]:
+        if not self.page_manager:
+            self.page_manager = PageManager(max_pages=self.config.get("max_pages", 50))
+
+        if self.config.get("mode") == "playwright":
+            return self.run_once_playwright()
+        else:
+            return self.run_once_vision()
+
+    def run_once_playwright(self) -> dict[str, Any]:
+        self.log("Iniciando ciclo de resolución (Playwright)...", "INFO")
+        
+        url = self.config.get("url")
+        if not url:
+            self.log("URL no configurada para el modo Playwright.", "ERROR")
+            raise ValueError("Configura la URL antes de iniciar.")
+
+        if not self.browser:
+            self.log("Abriendo navegador con Playwright...", "INFO")
+            self.browser = BotBrowser(headless=self.config.get("pw_headless", False))
+            self.browser.open(url, timeout_ms=self.config.get("pw_timeout_ms", 10000))
+            self.log(f"Navegando a {url}...", "INFO")
+
+        self.log("Buscando preguntas sin responder en el DOM...", "INFO")
+        page_data = self.browser.read_page()
+
+        if not page_data:
+            self.log("No se detectaron preguntas sin responder en esta página.", "INFO")
+            if self.config.get("auto_next", True):
+                self.log("Intentando avanzar a la siguiente página...", "INFO")
+                if self.page_manager.try_next(browser=self.browser, config=self):
+                    self.log(f"Avanzado a página {self.page_manager.current_page}.", "SUCCESS")
+                    time.sleep(self.config.get("next_wait_sec", 2.0))
+                    # Read again after transition
+                    page_data = self.browser.read_page()
+                else:
+                    self.log("No se pudo avanzar a la siguiente página o se alcanzó el límite.", "WARNING")
+            
+            if not page_data:
+                self.log("Fin del formulario o sin preguntas.", "SUCCESS")
+                run_data = {
+                    "timestamp": time.strftime("%H:%M:%S"),
+                    "question": "[No detectada / Fin de formulario]",
+                    "options": [],
+                    "answer": {
+                        "answer": "[Ninguna]",
+                        "confidence": 1.0,
+                        "reason": "Todas las preguntas resueltas.",
+                    },
+                    "click_plan": None,
+                }
+                self.last_run_info = run_data
+                self.broadcast({"type": "result", "data": run_data})
+                return run_data
+
+        parsed = ParsedQuestion.from_dom(page_data)
+        self.log(f"Pregunta: {parsed.question or '[No detectada]'}", "INFO")
+        if parsed.options:
+            self.log(f"Opciones: {', '.join(parsed.options)}", "INFO")
+        else:
+            self.log("No se detectaron opciones.", "INFO")
+
+        client = OllamaClient(
+            model=self.config["model"],
+            host=ensure_http(self.config["ollama_host"]),
+        )
+
+        if not client.is_available():
+            self.log(f"Ollama no disponible en {self.config['ollama_host']}", "ERROR")
+            raise Exception(f"Ollama no responde en {self.config['ollama_host']}. Abre Ollama e instala el modelo.")
+
+        self.log(f"Consultando modelo '{self.config['model']}'...", "INFO")
+        try:
+            answer = client.choose_answer(parsed)
+        except Exception as e:
+            self.log(f"Error en consulta con Ollama: {str(e)}", "ERROR")
+            raise
+
+        self.log(f"Respuesta elegida: '{answer.answer}' (Confianza: {answer.confidence:.2f})", "SUCCESS")
+        self.log(f"Explicacion: {answer.reason}", "INFO")
+
+        click_plan_info = None
+        # Match option
+        from core.actions import _similarity
+        best_idx = -1
+        best_score = 0.0
+        for idx, opt in enumerate(parsed.options):
+            score = _similarity(answer.answer, opt)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+
+        if best_idx != -1 and best_score >= self.config.get("min_click_score", 0.58):
+            selector = parsed.selectors[best_idx]
+            click_plan_info = {
+                "target_text": parsed.options[best_idx],
+                "score": best_score,
+                "selector": selector,
+                "dry_run": not self.config["i_am_authorized"],
+            }
+            self.log(
+                f"Plan de interacción: hacer clic en '{parsed.options[best_idx]}' [Selector: {selector}, Score: {best_score:.2f}]",
+                "INFO",
+            )
+
+            if self.config.get("confirm", False):
+                self.log("Requiere confirmacion del usuario para proceder.", "WARNING")
+                # Store pending playwright click plan
+                self.pending_click_plan = click_plan_info
+                self.broadcast({"type": "pending_confirm", "plan": click_plan_info})
+            else:
+                self.log("Ejecutando clic automático...", "INFO")
+                if not click_plan_info["dry_run"]:
+                    self.browser.click_option(selector)
+                    self.log("Clic enviado exitosamente.", "SUCCESS")
+                else:
+                    self.log("Modo seguro activo: clic simulado (sin acción real).", "WARNING")
+
+                self.page_manager.record(parsed.question, parsed.options[best_idx])
+
+                if self.config.get("auto_scroll", False):
+                    self.execute_scroll_action()
+        else:
+            self.log("No se pudo mapear la respuesta seleccionada con ninguna opción del DOM.", "WARNING")
+
+        run_data = {
+            "timestamp": time.strftime("%H:%M:%S"),
+            "question": parsed.question,
+            "options": parsed.options,
+            "answer": {
+                "answer": answer.answer,
+                "confidence": answer.confidence,
+                "reason": answer.reason,
+            },
+            "click_plan": click_plan_info,
+        }
+
+        self.last_run_info = run_data
+        self.broadcast({"type": "result", "data": run_data})
+        return run_data
+
+    def run_once_vision(self) -> dict[str, Any]:
         from core.capture import capture_screen
         from core.ocr import run_ocr
 
-        self.log("Iniciando ciclo de resolucion...", "INFO")
+        self.log("Iniciando ciclo de resolucion (Vision)...", "INFO")
         self.apply_tesseract_path()
 
         reg = self.config["region"]
@@ -233,6 +391,7 @@ class BotRunner:
         self.log(f"Explicacion: {answer.reason}", "INFO")
 
         click_plan_info = None
+        clicked_successfully = False
         if self.config["click"]:
             offset = (region_tuple[0], region_tuple[1]) if region_tuple else (0, 0)
             dry_run = not self.config["i_am_authorized"]
@@ -271,11 +430,22 @@ class BotRunner:
                         self.log("Modo seguro activo: clic simulado (sin accion real).", "WARNING")
                     else:
                         self.log("Clic enviado exitosamente.", "SUCCESS")
+                        clicked_successfully = True
+
+                    self.page_manager.record(parsed.question, answer.answer)
 
                     if self.config.get("auto_scroll", False):
                         self.execute_scroll_action()
             else:
                 self.log("No se pudo mapear la respuesta seleccionada con ninguna coordenada confiable.", "WARNING")
+
+        # Handle page transition in Vision mode
+        if clicked_successfully and self.config.get("auto_next", True):
+            self.log("Esperando antes de avanzar de página...", "INFO")
+            time.sleep(self.config.get("next_wait_sec", 2.0))
+            self.log("Buscando botón 'Siguiente' en la pantalla...", "INFO")
+            if self.page_manager.try_next(region=region_tuple, config=self):
+                self.log(f"Avanzado a página {self.page_manager.current_page}.", "SUCCESS")
 
         run_data = {
             "timestamp": time.strftime("%H:%M:%S"),
@@ -298,6 +468,7 @@ class BotRunner:
         if self.loop_active:
             return
         self.loop_active = True
+        self.paused = False
         self.broadcast({"type": "status", "loop_running": True})
         self.log("Modo continuo (bucle automatico) INICIADO.", "INFO")
         self._thread = threading.Thread(target=self._loop_worker, daemon=True)
@@ -307,9 +478,24 @@ class BotRunner:
         if not self.loop_active:
             return
         self.loop_active = False
+        self.paused = False
         self.pending_click_plan = None
         self.broadcast({"type": "status", "loop_running": False})
         self.log("Modo continuo (bucle automatico) DETENIDO.", "INFO")
+
+    def pause_loop(self) -> None:
+        if not self.loop_active or self.paused:
+            return
+        self.paused = True
+        self.broadcast({"type": "status", "loop_running": True, "paused": True})
+        self.log("Modo continuo PAUSADO.", "WARNING")
+
+    def resume_loop(self) -> None:
+        if not self.loop_active or not self.paused:
+            return
+        self.paused = False
+        self.broadcast({"type": "status", "loop_running": True, "paused": False})
+        self.log("Modo continuo REANUDADO.", "INFO")
 
     def handle_confirm(self, approved: bool) -> dict[str, bool]:
         if not self.pending_click_plan:
@@ -319,9 +505,23 @@ class BotRunner:
         self.pending_click_plan = None
 
         if approved:
-            self.log(f"Clic aprobado por el usuario en ({plan.x}, {plan.y})", "INFO")
-            execute_click(plan)
-            self.log("Clic ejecutado correctamente.", "SUCCESS")
+            if self.config.get("mode") == "playwright":
+                self.log(f"Clic aprobado por el usuario en selector: {plan['selector']}", "INFO")
+                if not plan["dry_run"]:
+                    self.browser.click_option(plan["selector"])
+                    self.log("Clic ejecutado correctamente.", "SUCCESS")
+                else:
+                    self.log("Modo seguro activo: clic simulado (sin accion real).", "WARNING")
+                
+                # Record it
+                self.page_manager.record(self.last_run_info.get("question", ""), plan["target_text"])
+            else:
+                self.log(f"Clic aprobado por el usuario en ({plan.x}, {plan.y})", "INFO")
+                execute_click(plan)
+                self.log("Clic ejecutado correctamente.", "SUCCESS")
+
+                # Record it
+                self.page_manager.record(self.last_run_info.get("question", ""), plan.target_text)
 
             if self.config.get("auto_scroll", False):
                 self.execute_scroll_action()
@@ -334,7 +534,11 @@ class BotRunner:
 
     def _loop_worker(self) -> None:
         self.pending_click_plan = None
+        self.page_manager = PageManager(max_pages=self.config.get("max_pages", 50))
         while self.loop_active:
+            if self.paused:
+                time.sleep(0.5)
+                continue
             if self.pending_click_plan:
                 time.sleep(0.5)
                 continue
@@ -347,7 +551,66 @@ class BotRunner:
             interval = self.config["interval"]
             elapsed = 0.0
             while elapsed < interval and self.loop_active:
-                if self.pending_click_plan:
+                if self.paused or self.pending_click_plan:
                     break
                 time.sleep(0.1)
                 elapsed += 0.1
+
+        # Close playwright browser if it was open
+        if self.browser:
+            self.log("Cerrando navegador Playwright...", "INFO")
+            try:
+                self.browser.close()
+            except Exception as e:
+                print(f"[ERROR] Error al cerrar navegador: {e}")
+            self.browser = None
+
+
+# Qt integration if PyQt5 is installed
+try:
+    from PyQt5.QtCore import QThread, pyqtSignal
+    HAS_PYQT = True
+except ImportError:
+    HAS_PYQT = False
+
+if HAS_PYQT:
+    class BotRunnerThread(QThread):
+        log_signal = pyqtSignal(str, str)
+        status_signal = pyqtSignal(str)
+        result_signal = pyqtSignal(dict)
+        screenshot_signal = pyqtSignal(str)
+
+        def __init__(self, runner: BotRunner) -> None:
+            super().__init__()
+            self.runner = runner
+            self.original_callback = self.runner.event_callback
+            self.runner.event_callback = self._on_event
+
+        def _on_event(self, event: dict[str, Any]) -> None:
+            if self.original_callback:
+                try:
+                    self.original_callback(event)
+                except Exception:
+                    pass
+
+            etype = event.get("type")
+            if etype == "log":
+                self.log_signal.emit(event.get("message", ""), event.get("level", "INFO"))
+            elif etype == "status":
+                loop_running = event.get("loop_running", False)
+                paused = event.get("paused", False)
+                if paused:
+                    self.status_signal.emit("paused")
+                elif loop_running:
+                    self.status_signal.emit("running")
+                else:
+                    self.status_signal.emit("idle")
+            elif etype == "result":
+                self.result_signal.emit(event.get("data", {}))
+            elif etype == "screenshot":
+                self.screenshot_signal.emit(event.get("path", ""))
+
+        def run(self) -> None:
+            self.runner.start_loop()
+            while self.runner.loop_active:
+                time.sleep(0.5)
