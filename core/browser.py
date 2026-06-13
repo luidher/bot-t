@@ -43,7 +43,7 @@ class BotBrowser:
             return None
 
         # Execute extraction script in the DOM context
-        js_extractor = """
+        js_extractor = r"""
         () => {
             // Find all question containers
             const containers = Array.from(document.querySelectorAll('ul.form-items > li, .form-items > li, li[data-type="OM"]'));
@@ -91,19 +91,23 @@ class BotBrowser:
                 }
             }
             
-            // Extract question text
+            // Extract question text and HTML
             let questionText = "";
+            let questionHtml = "";
             if (isFallback) {
                 const qEl = document.querySelector('.question, .pregunta');
                 questionText = qEl ? qEl.innerText : document.body.innerText;
+                questionHtml = qEl ? qEl.outerHTML : document.body.innerHTML;
             } else {
                 const qEl = targetContainer.querySelector('.question, .pregunta');
                 if (qEl) {
                     const clone = qEl.cloneNode(true);
                     questionText = clone.innerText;
+                    questionHtml = qEl.outerHTML;
                 } else {
                     const pEl = targetContainer.querySelector('p, h2, h3, h4');
                     questionText = pEl ? pEl.innerText : targetContainer.innerText;
+                    questionHtml = pEl ? pEl.outerHTML : targetContainer.innerHTML;
                 }
             }
             questionText = questionText.trim();
@@ -112,6 +116,7 @@ class BotBrowser:
             questionText = questionText.replace(/\s+/g, ' ');
             
             const options = [];
+            const optionsHtml = [];
             const selectors = [];
             
             // Find all input radio/checkbox elements in the target container
@@ -146,10 +151,12 @@ class BotBrowser:
             
             for (const input of optionInputs) {
                 let labelText = "";
+                let labelEl = null;
                 let parent = input.parentElement;
                 while (parent && parent !== targetContainer) {
                     if (parent.tagName === 'LABEL') {
                         labelText = parent.innerText;
+                        labelEl = parent;
                         break;
                     }
                     parent = parent.parentElement;
@@ -159,15 +166,18 @@ class BotBrowser:
                     const label = document.querySelector(`label[for="${input.id}"]`);
                     if (label) {
                         labelText = label.innerText;
+                        labelEl = label;
                     }
                 }
                 
                 if (!labelText) {
                     labelText = input.parentElement ? input.parentElement.innerText : "";
+                    labelEl = input.parentElement;
                 }
                 
                 labelText = labelText.trim();
                 options.push(labelText);
+                optionsHtml.push(labelEl ? labelEl.outerHTML : "");
                 selectors.push(getUniqueSelector(input));
             }
 
@@ -183,7 +193,9 @@ class BotBrowser:
             
             return {
                 question: questionText,
+                question_html: questionHtml,
                 options: options,
+                options_html: optionsHtml,
                 selectors: selectors,
                 media_selectors: mediaSelectors
             };
@@ -193,6 +205,17 @@ class BotBrowser:
             data = self.page.evaluate(js_extractor)
             if not data:
                 return None
+
+            # Detect if MathJax exists on the page
+            contains_mathjax = False
+            try:
+                contains_mathjax = (
+                    self.page.locator("mjx-assistive-mml").count() > 0 or
+                    self.page.locator("math").count() > 0
+                )
+            except Exception:
+                pass
+            data["contains_mathjax"] = contains_mathjax
 
             import base64
             media_base64 = []

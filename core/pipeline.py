@@ -10,8 +10,13 @@ from core.vision import QwenVisionClient
 
 VISUAL_KEYWORDS = [
     "imagen",
+    "imagenes",
+    "imágenes",
     "gráfico",
     "grafica",
+    "gráfica",
+    "graficas",
+    "gráficas",
     "tabla",
     "diagrama",
     "figura",

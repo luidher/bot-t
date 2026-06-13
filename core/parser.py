@@ -14,6 +14,7 @@ class ParsedQuestion:
     raw_lines: list[str]
     selectors: list[str] = field(default_factory=list)
     media: list[str] = field(default_factory=list)
+    contains_mathjax: bool = False
 
     @property
     def has_options(self) -> bool:
@@ -25,12 +26,50 @@ class ParsedQuestion:
 
         data = {"question": str, "options": list[str], "selectors": list[str], "media": list[str]}
         """
-        question = str(data.get("question", "")).strip()
-        options = [str(o).strip() for o in data.get("options", []) if str(o).strip()]
+        import html as html_lib
+        from core.mathjax_parser import MathJaxParser
+
+        def strip_html_tags(text: str) -> str:
+            text = html_lib.unescape(text)
+            text = re.sub(r'<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>', '', text, flags=re.I)
+            text = re.sub(r'<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>', '', text, flags=re.I)
+            text = re.sub(r'</?(?:p|div|h\d|li|br|tr)[^>]*>', '\n', text, flags=re.I)
+            text = re.sub(r'<[^>]+>', '', text)
+            text = re.sub(r'[ \t]+', ' ', text)
+            text = re.sub(r'\n+', '\n', text)
+            return text.strip()
+
+        parser = MathJaxParser()
+        contains_mathjax = data.get("contains_mathjax", False)
+
+        question_html = data.get("question_html")
+        if question_html:
+            question = parser.replace_mathjax(question_html)
+            question = strip_html_tags(question)
+        else:
+            question = str(data.get("question", "")).strip()
+
+        options = []
+        options_html = data.get("options_html", [])
+        if options_html:
+            for opt_html in options_html:
+                opt_text = parser.replace_mathjax(opt_html)
+                opt_text = strip_html_tags(opt_text)
+                options.append(opt_text)
+        else:
+            options = [str(o).strip() for o in data.get("options", []) if str(o).strip()]
+
         selectors = [str(s).strip() for s in data.get("selectors", []) if str(s).strip()]
         media = [str(m).strip() for m in data.get("media", []) if str(m).strip()]
         raw_lines = [question] + options
-        return cls(question=question, options=options, raw_lines=raw_lines, selectors=selectors, media=media)
+        return cls(
+            question=question,
+            options=options,
+            raw_lines=raw_lines,
+            selectors=selectors,
+            media=media,
+            contains_mathjax=contains_mathjax
+        )
 
 
 def parse_question(text: str, media: list[str] | None = None) -> ParsedQuestion:
