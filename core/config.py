@@ -15,14 +15,22 @@ class BotConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # Operating mode
-    mode: str = Field(default="vision")                # "vision" | "playwright"
+    mode: str = Field(default="auto")                # "auto" | "vision" | "playwright"
+
 
     # Target
     url: str = Field(default="")                       # Used in playwright mode
 
     # Ollama / AI
-    model: str = Field(default="llama3.1", min_length=1, max_length=120)
+    # `model` se conserva como alias de compatibilidad para `reason_model`.
+    model: str = Field(default="deepseek-r1:8b", min_length=1, max_length=120)
     ollama_host: str = Field(default="http://localhost:11434", min_length=1, max_length=300)
+    vision_model: str = Field(default="qwen2.5-vl", min_length=1, max_length=120)
+    reason_model: str = Field(default="deepseek-r1:8b", min_length=1, max_length=120)
+    confidence_threshold: float = Field(default=0.70, ge=0.0, le=1.0)
+    max_think_ms: int = Field(default=5000, ge=0)
+    vision_enabled: bool = Field(default=True)
+    log_reasoning: bool = Field(default=False)
 
     # OCR (vision mode)
     lang: str = Field(default="spa+eng", min_length=1, max_length=80)
@@ -56,10 +64,14 @@ class BotConfig(BaseModel):
     scroll_amount: int = Field(default=-300, ge=-10000, le=10000)
     scroll_delay: float = Field(default=1.0, ge=0.0, le=60.0)
 
-    @field_validator("model", "ollama_host", "lang", "tesseract_cmd", "url", mode="before")
+    @field_validator("model", "vision_model", "reason_model", "ollama_host", "lang", "tesseract_cmd", "url", mode="before")
     @classmethod
     def _strip_text(cls, value: Any) -> Any:
-        return value.strip() if isinstance(value, str) else value
+        if isinstance(value, str):
+            value = value.strip()
+            if value == "llama3.1":
+                return "deepseek-r1:8b"
+        return value
 
     @field_validator("ollama_host")
     @classmethod
@@ -77,6 +89,12 @@ class BotConfig(BaseModel):
         if width <= 0 or height <= 0:
             raise ValueError("region debe tener ancho y alto mayores que cero")
 
+        return self
+
+    @model_validator(mode="after")
+    def _sync_reason_model(self) -> "BotConfig":
+        if self.model and self.reason_model != self.model:
+            self.reason_model = self.model
         return self
 
     def save(self) -> None:
@@ -119,6 +137,12 @@ class BotConfigUpdate(BaseModel):
     url: Optional[str] = None
     model: Optional[str] = Field(default=None, min_length=1, max_length=120)
     ollama_host: Optional[str] = Field(default=None, min_length=1, max_length=300)
+    vision_model: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    reason_model: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    confidence_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    max_think_ms: Optional[int] = Field(default=None, ge=0)
+    vision_enabled: Optional[bool] = None
+    log_reasoning: Optional[bool] = None
     lang: Optional[str] = Field(default=None, min_length=1, max_length=80)
     psm: Optional[int] = Field(default=None, ge=0, le=13)
     region: Optional[tuple[int, int, int, int]] = None
@@ -142,10 +166,14 @@ class BotConfigUpdate(BaseModel):
     pw_timeout_ms: Optional[int] = Field(default=None, ge=0)
     pw_headless: Optional[bool] = None
 
-    @field_validator("model", "ollama_host", "lang", "tesseract_cmd", "url", mode="before")
+    @field_validator("model", "vision_model", "reason_model", "ollama_host", "lang", "tesseract_cmd", "url", mode="before")
     @classmethod
     def _strip_text(cls, value: Any) -> Any:
-        return value.strip() if isinstance(value, str) else value
+        if isinstance(value, str):
+            value = value.strip()
+            if value == "llama3.1":
+                return "deepseek-r1:8b"
+        return value
 
     @field_validator("ollama_host")
     @classmethod
@@ -165,6 +193,12 @@ class BotConfigUpdate(BaseModel):
         if width <= 0 or height <= 0:
             raise ValueError("region debe tener ancho y alto mayores que cero")
 
+        return self
+
+    @model_validator(mode="after")
+    def _sync_reason_model(self) -> "BotConfigUpdate":
+        if self.model and self.reason_model is None:
+            self.reason_model = self.model
         return self
 
 

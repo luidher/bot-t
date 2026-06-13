@@ -171,10 +171,29 @@ class BotBrowser:
                 selectors.push(getUniqueSelector(input));
             }
             
+            const mediaSelectors = [];
+            const mediaElementsData = [];
+            if (targetContainer) {
+                const mediaElements = Array.from(targetContainer.querySelectorAll('img, svg, canvas, table, iframe'));
+                for (const media of mediaElements) {
+                    const sel = getUniqueSelector(media);
+                    mediaSelectors.push(sel);
+                    mediaElementsData.push({
+                        selector: sel,
+                        tagName: media.tagName.toLowerCase(),
+                        src: media.getAttribute('src') || media.src || "",
+                        width: media.clientWidth || media.width || 0,
+                        height: media.clientHeight || media.height || 0
+                    });
+                }
+            }
+            
             return {
                 question: questionText,
                 options: options,
-                selectors: selectors
+                selectors: selectors,
+                media_selectors: mediaSelectors,
+                media_elements: mediaElementsData
             };
         }
         """
@@ -210,6 +229,20 @@ class BotBrowser:
             return True
         except Exception as e:
             print(f"[BROWSER WARNING] Click next page failed: {e}")
+            return False
+
+    def screenshot_element(self, selector: str, output_path: str | Path) -> bool:
+        """Capture a screenshot of a specific element and save to output_path."""
+        if not self.page:
+            return False
+        try:
+            loc = self.page.locator(selector)
+            if loc.count() > 0:
+                loc.first.screenshot(path=str(output_path))
+                return True
+            return False
+        except Exception as e:
+            print(f"[BROWSER WARNING] Failed to screenshot element {selector}: {e}")
             return False
 
     def close(self) -> None:

@@ -5,25 +5,60 @@ import sys
 import time
 
 from core.actions import execute_click, plan_click_for_answer
-from core.ai import OllamaClient
+from core.ai import is_model_available
 from core.capture import Region, capture_screen
+from core.config import BotConfig
 from core.ocr import run_ocr
 from core.parser import parse_question
+from core.pipeline import DecisionPipeline
 
 
 def main() -> int:
     args = parse_args()
     region = parse_region(args.region)
-    client = OllamaClient(model=args.model, host=args.ollama_host)
 
-    if not client.is_available():
-        print("[ERROR] Ollama no responde. Inicia Ollama y verifica el modelo.")
+    # Build config from CLI args
+    cfg = BotConfig(
+        reason_model=args.reason_model,
+        vision_model=args.vision_model,
+        ollama_host=args.ollama_host,
+        vision_enabled=args.vision_enabled,
+        confidence_threshold=args.confidence_threshold,
+        log_reasoning=args.log_reasoning,
+    )
+
+    # Verify models are available
+    import requests
+    host = cfg.ensure_http()
+    try:
+        resp = requests.get(f"{host}/api/tags", timeout=5)
+        if not resp.ok:
+            print("[ERROR] Ollama no responde. Inicia Ollama y verifica los modelos.")
+            return 2
+        models = [m["name"] for m in resp.json().get("models", [])]
+    except Exception:
+        print("[ERROR] Ollama no responde. Inicia Ollama y verifica los modelos.")
         print(f"        Host: {args.ollama_host}")
-        print(f"        Modelo esperado: {args.model}")
         return 2
 
+    if not is_model_available(models, cfg.reason_model):
+        print(f"[ERROR] Modelo de razonamiento '{cfg.reason_model}' no encontrado en Ollama.")
+        print(f"        Modelos disponibles: {', '.join(models)}")
+        return 2
+
+    if cfg.vision_enabled and not is_model_available(models, cfg.vision_model):
+        print(f"[WARNING] Modelo de visión '{cfg.vision_model}' no encontrado en Ollama.")
+        print(f"          Se desactivará el análisis visual.")
+        cfg.vision_enabled = False
+
+    print(f"[INFO] Modelo de razonamiento: {cfg.reason_model}")
+    print(f"[INFO] Modelo de visión: {cfg.vision_model} ({'activado' if cfg.vision_enabled else 'desactivado'})")
+    print(f"[INFO] Umbral de confianza: {cfg.confidence_threshold}")
+
+    pipeline = DecisionPipeline(cfg)
+
     while True:
-        run_once(args=args, client=client, region=region)
+        run_once(args=args, pipeline=pipeline, config=cfg, region=region)
         if not args.loop:
             break
         time.sleep(args.interval)
@@ -31,7 +66,12 @@ def main() -> int:
     return 0
 
 
-def run_once(args: argparse.Namespace, client: OllamaClient, region: Region | None) -> None:
+def run_once(
+    args: argparse.Namespace,
+    pipeline: DecisionPipeline,
+    config: BotConfig,
+    region: Region | None,
+) -> None:
     capture = capture_screen(region=region)
     ocr = run_ocr(capture.image, lang=args.lang, psm=args.psm, preprocess=not args.no_preprocess)
     parsed = parse_question(ocr.text)
@@ -52,11 +92,41 @@ def run_once(args: argparse.Namespace, client: OllamaClient, region: Region | No
     else:
         print("[sin opciones detectadas]")
 
-    answer = client.choose_answer(parsed)
+    # Execute pipeline (media_paths is the screenshot for OCR mode)
+    media_paths = [str(capture.path)]
+
+    try:
+        answer, qwen_activated, visual_descs = pipeline.run(
+            question=parsed.question,
+            options=parsed.options,
+            media_paths=media_paths,
+            is_dom_mode=False,
+        )
+    except Exception as e:
+        print(f"\n[ERROR] Error en pipeline: {e}")
+        return
+
+    model_used = config.reason_model
+    if qwen_activated:
+        model_used = f"{config.vision_model} + {config.reason_model}"
+
     print("\n=== RESPUESTA IA LOCAL ===")
+    print(f"Modelo: {model_used}")
+    print(f"Qwen activado: {'Sí' if qwen_activated else 'No'}")
     print(f"Respuesta: {answer.answer}")
     print(f"Confianza: {answer.confidence:.2f}")
-    print(f"Razon: {answer.reason}")
+    print(f"Razonamiento: {answer.reasoning}")
+    print(f"Tiempo de razonamiento: {answer.think_time_ms} ms")
+
+    # Confidence warning
+    if answer.confidence < config.confidence_threshold:
+        print(f"\n⚠ ADVERTENCIA: Confianza ({answer.confidence:.2f}) por debajo del umbral ({config.confidence_threshold:.2f}).")
+
+    # Log visual descriptions if present
+    if qwen_activated and visual_descs:
+        print("\n=== ANÁLISIS VISUAL (Qwen) ===")
+        import json
+        print(json.dumps(visual_descs, indent=2, ensure_ascii=False))
 
     if not args.click:
         return
@@ -92,9 +162,10 @@ def run_once(args: argparse.Namespace, client: OllamaClient, region: Region | No
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Bot local de vision + OCR + Ollama para demos autorizadas.",
+        description="Bot local de vision + OCR + Ollama (Híbrido: Qwen2.5-VL + DeepSeek-R1).",
     )
-    parser.add_argument("--model", default="llama3.1", help="Modelo local de Ollama.")
+    parser.add_argument("--reason-model", default="deepseek-r1:8b", help="Modelo de razonamiento (DeepSeek).")
+    parser.add_argument("--vision-model", default="qwen2.5-vl", help="Modelo de visión (Qwen2.5-VL).")
     parser.add_argument("--ollama-host", default="http://localhost:11434")
     parser.add_argument("--lang", default="spa+eng", help="Idiomas de Tesseract.")
     parser.add_argument("--psm", type=int, default=6, help="Page segmentation mode de Tesseract.")
@@ -110,7 +181,12 @@ def parse_args() -> argparse.Namespace:
         help="Habilita clic real en un entorno propio/autorizado.",
     )
     parser.add_argument("--min-click-score", type=float, default=0.58)
-    return parser.parse_args()
+    parser.add_argument("--no-vision", action="store_true", help="Desactiva el análisis visual con Qwen.")
+    parser.add_argument("--confidence-threshold", type=float, default=0.70, help="Umbral mínimo de confianza.")
+    parser.add_argument("--log-reasoning", action="store_true", help="Registra el razonamiento completo.")
+    args = parser.parse_args()
+    args.vision_enabled = not args.no_vision
+    return args
 
 
 def parse_region(value: str | None) -> Region | None:

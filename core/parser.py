@@ -13,6 +13,8 @@ class ParsedQuestion:
     options: list[str]
     raw_lines: list[str]
     selectors: list[str] = field(default_factory=list)
+    media_selectors: list[str] = field(default_factory=list)
+    media_elements: list[dict] = field(default_factory=list)
 
     @property
     def has_options(self) -> bool:
@@ -22,13 +24,22 @@ class ParsedQuestion:
     def from_dom(cls, data: dict) -> "ParsedQuestion":
         """Construye un ParsedQuestion desde los datos extraídos del DOM.
 
-        data = {"question": str, "options": list[str], "selectors": list[str]}
+        data = {"question": str, "options": list[str], "selectors": list[str], "media_selectors": list[str], "media_elements": list[dict]}
         """
         question = str(data.get("question", "")).strip()
         options = [str(o).strip() for o in data.get("options", []) if str(o).strip()]
         selectors = [str(s).strip() for s in data.get("selectors", []) if str(s).strip()]
+        media_selectors = [str(m).strip() for m in data.get("media_selectors", []) if str(m).strip()]
+        media_elements = data.get("media_elements", [])
         raw_lines = [question] + options
-        return cls(question=question, options=options, raw_lines=raw_lines, selectors=selectors)
+        return cls(
+            question=question,
+            options=options,
+            raw_lines=raw_lines,
+            selectors=selectors,
+            media_selectors=media_selectors,
+            media_elements=media_elements,
+        )
 
 
 def parse_question(text: str) -> ParsedQuestion:

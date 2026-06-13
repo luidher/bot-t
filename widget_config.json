@@ -1,16 +1,22 @@
 {
-    "mode": "playwright",
+    "mode": "vision",
     "url": "https://pruebat.org/",
-    "model": "llama3.1",
+    "model": "deepseek-r1:8b",
     "ollama_host": "http://localhost:11434",
+    "vision_model": "qwen2.5-vl",
+    "reason_model": "deepseek-r1:8b",
+    "confidence_threshold": 0.7,
+    "max_think_ms": 5000,
+    "vision_enabled": true,
+    "log_reasoning": false,
     "lang": "spa+eng",
     "psm": 6,
     "no_preprocess": false,
     "region": [
-        661,
-        269,
-        1159,
-        679
+        693,
+        171,
+        1051,
+        592
     ],
     "click": true,
     "confirm": false,
