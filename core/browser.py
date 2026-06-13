@@ -91,19 +91,23 @@ class BotBrowser:
                 }
             }
             
-            // Extract question text
+            // Extract question text and html
             let questionText = "";
+            let questionHtml = "";
             if (isFallback) {
                 const qEl = document.querySelector('.question, .pregunta');
                 questionText = qEl ? qEl.innerText : document.body.innerText;
+                questionHtml = qEl ? qEl.outerHTML : document.body.innerHTML;
             } else {
                 const qEl = targetContainer.querySelector('.question, .pregunta');
                 if (qEl) {
                     const clone = qEl.cloneNode(true);
                     questionText = clone.innerText;
+                    questionHtml = qEl.outerHTML;
                 } else {
                     const pEl = targetContainer.querySelector('p, h2, h3, h4');
                     questionText = pEl ? pEl.innerText : targetContainer.innerText;
+                    questionHtml = pEl ? pEl.outerHTML : targetContainer.outerHTML;
                 }
             }
             questionText = questionText.trim();
@@ -112,6 +116,7 @@ class BotBrowser:
             questionText = questionText.replace(/\s+/g, ' ');
             
             const options = [];
+            const optionsHtml = [];
             const selectors = [];
             
             // Find all input radio/checkbox elements in the target container
@@ -146,10 +151,12 @@ class BotBrowser:
             
             for (const input of optionInputs) {
                 let labelText = "";
+                let labelHtml = "";
                 let parent = input.parentElement;
                 while (parent && parent !== targetContainer) {
                     if (parent.tagName === 'LABEL') {
                         labelText = parent.innerText;
+                        labelHtml = parent.outerHTML;
                         break;
                     }
                     parent = parent.parentElement;
@@ -159,15 +166,18 @@ class BotBrowser:
                     const label = document.querySelector(`label[for="${input.id}"]`);
                     if (label) {
                         labelText = label.innerText;
+                        labelHtml = label.outerHTML;
                     }
                 }
                 
                 if (!labelText) {
                     labelText = input.parentElement ? input.parentElement.innerText : "";
+                    labelHtml = input.parentElement ? input.parentElement.outerHTML : "";
                 }
                 
                 labelText = labelText.trim();
                 options.push(labelText);
+                optionsHtml.push(labelHtml);
                 selectors.push(getUniqueSelector(input));
             }
             
@@ -190,7 +200,9 @@ class BotBrowser:
             
             return {
                 question: questionText,
+                question_html: questionHtml,
                 options: options,
+                options_html: optionsHtml,
                 selectors: selectors,
                 media_selectors: mediaSelectors,
                 media_elements: mediaElementsData

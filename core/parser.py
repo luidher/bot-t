@@ -26,8 +26,31 @@ class ParsedQuestion:
 
         data = {"question": str, "options": list[str], "selectors": list[str], "media_selectors": list[str], "media_elements": list[dict]}
         """
-        question = str(data.get("question", "")).strip()
-        options = [str(o).strip() for o in data.get("options", []) if str(o).strip()]
+        from core.mathjax_parser import MathJaxParser
+        from bs4 import BeautifulSoup
+        
+        math_parser = MathJaxParser()
+
+        question_html = data.get("question_html")
+        if question_html:
+            cleaned_html = math_parser.replace_mathjax(question_html)
+            question = BeautifulSoup(cleaned_html, "html.parser").get_text().strip()
+            question = re.sub(r"\s+", " ", question)
+        else:
+            question = str(data.get("question", "")).strip()
+
+        options_html = data.get("options_html")
+        if options_html:
+            options = []
+            for opt_html in options_html:
+                cleaned_opt_html = math_parser.replace_mathjax(opt_html)
+                opt_text = BeautifulSoup(cleaned_opt_html, "html.parser").get_text().strip()
+                opt_text = re.sub(r"\s+", " ", opt_text)
+                if opt_text:
+                    options.append(opt_text)
+        else:
+            options = [str(o).strip() for o in data.get("options", []) if str(o).strip()]
+
         selectors = [str(s).strip() for s in data.get("selectors", []) if str(s).strip()]
         media_selectors = [str(m).strip() for m in data.get("media_selectors", []) if str(m).strip()]
         media_elements = data.get("media_elements", [])
