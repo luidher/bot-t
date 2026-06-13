@@ -9,12 +9,13 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from core.actions import execute_click, plan_click_for_answer, execute_playwright_click
-from core.ai import OllamaClient
+from core.actions import execute_click, plan_click_for_answer
+from core.ai import is_model_available
 from core.config import BotConfig, BotConfigUpdate, default_config_dict, merge_config
 from core.parser import parse_question, ParsedQuestion
 from core.browser import BotBrowser
 from core.page_manager import PageManager
+from core.pipeline import DecisionPipeline
 
 CONFIG_FILE = Path("web_config.json")
 
@@ -87,6 +88,17 @@ class BotRunner:
 
             pytesseract.pytesseract.tesseract_cmd = cmd
 
+    def _build_pipeline(self) -> DecisionPipeline:
+        """Build a DecisionPipeline from the current config dict."""
+        cfg = BotConfig.model_validate(self.config)
+        return DecisionPipeline(cfg)
+
+    def _pipeline_model_used(self, qwen_activated: bool) -> str:
+        reason_model = self.config.get("reason_model", "deepseek-r1:8b")
+        if qwen_activated:
+            return f"{self.config.get('vision_model', 'qwen2.5-vl')} + {reason_model}"
+        return str(reason_model)
+
     def get_system_status(self) -> dict[str, Any]:
         import requests
 
@@ -94,11 +106,16 @@ class BotRunner:
         models = []
         host = ensure_http(self.config["ollama_host"])
 
+        reason_model_ok = False
+        vision_model_ok = False
+
         try:
             response = requests.get(f"{host.rstrip('/')}/api/tags", timeout=1.5)
             if response.ok:
                 ollama_ok = True
                 models = [m["name"] for m in response.json().get("models", [])]
+                reason_model_ok = is_model_available(models, self.config.get("reason_model", "deepseek-r1:8b"))
+                vision_model_ok = is_model_available(models, self.config.get("vision_model", "qwen2.5-vl"))
         except Exception:
             pass
 
@@ -108,6 +125,8 @@ class BotRunner:
         return {
             "ollama_available": ollama_ok,
             "ollama_models": models,
+            "reason_model_available": reason_model_ok,
+            "vision_model_available": vision_model_ok,
             "tesseract_available": tess_ok,
             "loop_running": self.loop_active,
             "paused": self.paused,
@@ -189,17 +208,31 @@ class BotRunner:
         if not self.page_manager:
             self.page_manager = PageManager(max_pages=self.config.get("max_pages", 50))
 
-        if self.config.get("mode") == "playwright":
-            return self.run_once_playwright()
+        mode = self.config.get("mode", "auto")
+        if mode == "auto":
+            if self.config.get("url"):
+                return self.run_once_auto_playwright()
+            else:
+                return self.run_once_auto_vision()
+        elif mode == "playwright":
+            return self.run_once_auto_playwright()
         else:
-            return self.run_once_vision()
+            return self.run_once_auto_vision()
 
     def run_once_playwright(self) -> dict[str, Any]:
-        self.log("Iniciando ciclo de resolución (Playwright)...", "INFO")
+        """Legacy wrapper for playwright execution."""
+        return self.run_once_auto_playwright()
+
+    def run_once_vision(self) -> dict[str, Any]:
+        """Legacy wrapper for vision execution."""
+        return self.run_once_auto_vision()
+
+    def run_once_auto_playwright(self) -> dict[str, Any]:
+        self.log("Iniciando ciclo de resolución inteligente (Playwright)...", "INFO")
         
         url = self.config.get("url")
         if not url:
-            self.log("URL no configurada para el modo Playwright.", "ERROR")
+            self.log("URL no configurada para el modo Playwright/Auto.", "ERROR")
             raise ValueError("Configura la URL antes de iniciar.")
 
         if not self.browser:
@@ -233,82 +266,201 @@ class BotRunner:
                         "answer": "[Ninguna]",
                         "confidence": 1.0,
                         "reason": "Todas las preguntas resueltas.",
+                        "think_time_ms": 0,
                     },
                     "click_plan": None,
+                    "qwen_activated": False,
+                    "model_used": "ninguno",
+                    "visual_descriptions": None,
+                    "confidence_threshold": self.config.get("confidence_threshold", 0.70),
                 }
                 self.last_run_info = run_data
                 self.broadcast({"type": "result", "data": run_data})
                 return run_data
 
         parsed = ParsedQuestion.from_dom(page_data)
+        
+        # --- FASE 1: Detección de Pregunta ---
+        visual_elements_detected = len(parsed.media_elements) > 0
+        phase1_result = {
+            "question_detected": bool(parsed.question),
+            "options_detected": len(parsed.options) > 0,
+            "visual_elements_detected": visual_elements_detected
+        }
+        self.log(f"[FASE 1] Detección de Pregunta: {json.dumps(phase1_result, ensure_ascii=False)}", "INFO")
         self.log(f"Pregunta: {parsed.question or '[No detectada]'}", "INFO")
         if parsed.options:
             self.log(f"Opciones: {', '.join(parsed.options)}", "INFO")
         else:
             self.log("No se detectaron opciones.", "INFO")
 
-        client = OllamaClient(
-            model=self.config["model"],
-            host=ensure_http(self.config["ollama_host"]),
-        )
+        # --- Hybrid Pipeline ---
+        pipeline = self._build_pipeline()
 
-        if not client.is_available():
-            self.log(f"Ollama no disponible en {self.config['ollama_host']}", "ERROR")
-            raise Exception(f"Ollama no responde en {self.config['ollama_host']}. Abre Ollama e instala el modelo.")
+        # --- FASE 2: Evaluación de Suficiencia del DOM ---
+        if not visual_elements_detected:
+            self.log("[FASE 2] Suficiencia del DOM: El DOM es suficiente (pregunta textual). Omitiendo visión y OCR.", "SUCCESS")
+            try:
+                answer, qwen_activated, visual_descs = pipeline.run(
+                    question=parsed.question,
+                    options=parsed.options,
+                    media_paths=[],
+                    is_dom_mode=True,
+                    ocr_texts=None,
+                    ocr_context="",
+                )
+            except Exception as e:
+                self.log(f"Error en pipeline híbrida: {str(e)}", "ERROR")
+                raise
+        else:
+            # Hay elementos visuales
+            # --- FASE 3: Detección de Contenido Visual ---
+            self.log(f"[FASE 3] Contenido Visual: Detectados {len(parsed.media_elements)} elementos visuales.", "INFO")
+            
+            # --- FASE 4: Scroll Inteligente ---
+            self.log("[FASE 4] Scroll Inteligente: Desplazando al contenido visual...", "INFO")
+            try:
+                first_selector = parsed.media_elements[0]["selector"]
+                self.browser.page.locator(first_selector).first.scroll_into_view_if_needed()
+                time.sleep(1.5)  # Esperar que cargue/estabilice
+                # Reinspeccionar DOM
+                page_data = self.browser.read_page()
+                parsed = ParsedQuestion.from_dom(page_data)
+                self.log("[FASE 4] Reinspección del DOM completada.", "INFO")
+            except Exception as e:
+                self.log(f"[FASE 4 WARNING] Error al desplazar/reinspeccionar: {e}", "WARNING")
 
-        self.log(f"Consultando modelo '{self.config['model']}'...", "INFO")
-        try:
-            answer = client.choose_answer(parsed)
-        except Exception as e:
-            self.log(f"Error en consulta con Ollama: {str(e)}", "ERROR")
-            raise
+            # --- FASE 5 & 6: Evaluación de Accesibilidad e OCR bajo demanda ---
+            media_paths: list[str] = []
+            ocr_texts_list: list[str] = []
+            Path("screenshots").mkdir(exist_ok=True)
+
+            if self.config.get("vision_enabled", True):
+                for idx, elem in enumerate(parsed.media_elements):
+                    out_path = Path("screenshots") / f"media_element_{idx}.png"
+                    selector = elem["selector"]
+                    tag = elem["tagName"]
+                    src = elem["src"]
+                    
+                    self.log(f"[FASE 3] Procesando recurso visual #{idx + 1} ({tag}) [Selector: {selector}]", "INFO")
+                    
+                    # Intentar captura del elemento
+                    if self.browser.screenshot_element(selector, out_path):
+                        media_paths.append(str(out_path))
+                        
+                        # Fase 5: ¿Es accesible directamente?
+                        # Si es etiqueta img con src válido y no está vacío, asumimos accesible directamente.
+                        if tag == "img" and src and not src.startswith("data:"):
+                            self.log(f"[FASE 5] Imagen accesible directamente ({tag}). Omitiendo OCR.", "INFO")
+                            ocr_texts_list.append("")
+                        else:
+                            # Fase 6: OCR Bajo Demanda
+                            self.log(f"[FASE 6] Elemento inaccesible directamente ({tag}). Ejecutando OCR bajo demanda...", "WARNING")
+                            try:
+                                from core.ocr import run_ocr
+                                ocr_res = run_ocr(
+                                    out_path,
+                                    lang=self.config["lang"],
+                                    psm=self.config["psm"],
+                                    preprocess=not self.config["no_preprocess"]
+                                )
+                                text_found = ocr_res.text.strip()
+                                if text_found:
+                                    self.log(f"[FASE 6] OCR completado. Texto detectado: '{text_found[:80]}...'", "SUCCESS")
+                                    ocr_texts_list.append(text_found)
+                                else:
+                                    self.log("[FASE 6] OCR completado. No se detectó texto en el elemento.", "INFO")
+                                    ocr_texts_list.append("")
+                            except Exception as e:
+                                self.log(f"[FASE 6 ERROR] Error en OCR: {e}", "ERROR")
+                                ocr_texts_list.append("")
+                    else:
+                        self.log(f"[VISION WARNING] Falló captura de pantalla del elemento: {selector}", "WARNING")
+
+            ocr_context = "\n".join(t for t in ocr_texts_list if t)
+
+            # --- FASES 7 & 8: Análisis Visual y Razonamiento/Validación ---
+            self.log(f"Ejecutando pipeline híbrida (Reason: {self.config['reason_model']})...", "INFO")
+            try:
+                answer, qwen_activated, visual_descs = pipeline.run(
+                    question=parsed.question,
+                    options=parsed.options,
+                    media_paths=media_paths,
+                    is_dom_mode=True,
+                    ocr_texts=ocr_texts_list,
+                    ocr_context=ocr_context,
+                )
+            except Exception as e:
+                self.log(f"Error en pipeline híbrida: {str(e)}", "ERROR")
+                raise
+
+        model_used = self._pipeline_model_used(qwen_activated)
+        if qwen_activated:
+            self.log(f"Qwen2.5-VL activado para análisis visual.", "INFO")
 
         self.log(f"Respuesta elegida: '{answer.answer}' (Confianza: {answer.confidence:.2f})", "SUCCESS")
-        self.log(f"Explicacion: {answer.reason}", "INFO")
+        self.log(f"Razonamiento: {answer.reasoning}", "INFO")
+        self.log(f"Tiempo de razonamiento: {answer.think_time_ms} ms", "INFO")
 
-        click_plan_info = None
-        # Match option
-        from core.actions import _similarity
-        best_idx = -1
-        best_score = 0.0
-        for idx, opt in enumerate(parsed.options):
-            score = _similarity(answer.answer, opt)
-            if score > best_score:
-                best_score = score
-                best_idx = idx
-
-        if best_idx != -1 and best_score >= self.config.get("min_click_score", 0.58):
-            selector = parsed.selectors[best_idx]
-            click_plan_info = {
-                "target_text": parsed.options[best_idx],
-                "score": best_score,
-                "selector": selector,
-                "dry_run": not self.config["i_am_authorized"],
-            }
+        # Confidence threshold warning
+        confidence_threshold = self.config.get("confidence_threshold", 0.70)
+        if answer.confidence < confidence_threshold:
             self.log(
-                f"Plan de interacción: hacer clic en '{parsed.options[best_idx]}' [Selector: {selector}, Score: {best_score:.2f}]",
-                "INFO",
+                f"⚠ Confianza ({answer.confidence:.2f}) por debajo del umbral ({confidence_threshold:.2f}).",
+                "WARNING",
             )
 
-            if self.config.get("confirm", False):
-                self.log("Requiere confirmacion del usuario para proceder.", "WARNING")
-                # Store pending playwright click plan
-                self.pending_click_plan = click_plan_info
-                self.broadcast({"type": "pending_confirm", "plan": click_plan_info})
-            else:
-                self.log("Ejecutando clic automático...", "INFO")
-                if not click_plan_info["dry_run"]:
-                    self.browser.click_option(selector)
-                    self.log("Clic enviado exitosamente.", "SUCCESS")
+        if self.config.get("log_reasoning", False):
+            self.log(f"[REASONING LOG] {answer.reasoning}", "INFO")
+
+        click_plan_info = None
+        if parsed.options:
+            from core.actions import _similarity
+            best_idx = -1
+            best_score = 0.0
+            for idx, opt in enumerate(parsed.options):
+                score = _similarity(answer.answer, opt)
+                if score > best_score:
+                    best_score = score
+                    best_idx = idx
+
+            if (
+                best_idx != -1
+                and best_idx < len(parsed.selectors)
+                and best_score >= self.config.get("min_click_score", 0.58)
+            ):
+                selector = parsed.selectors[best_idx]
+                click_plan_info = {
+                    "target_text": parsed.options[best_idx],
+                    "score": best_score,
+                    "selector": selector,
+                    "dry_run": not self.config["i_am_authorized"],
+                }
+                self.log(
+                    f"Plan de interacción: hacer clic en '{parsed.options[best_idx]}' [Selector: {selector}, Score: {best_score:.2f}]",
+                    "INFO",
+                )
+
+                if self.config.get("confirm", False):
+                    self.log("Requiere confirmacion del usuario para proceder.", "WARNING")
+                    self.pending_click_plan = click_plan_info
+                    self.broadcast({"type": "pending_confirm", "plan": click_plan_info})
                 else:
-                    self.log("Modo seguro activo: clic simulado (sin acción real).", "WARNING")
+                    self.log("Ejecutando clic automático...", "INFO")
+                    if not click_plan_info["dry_run"]:
+                        self.browser.click_option(selector)
+                        self.log("Clic enviado exitosamente.", "SUCCESS")
+                    else:
+                        self.log("Modo seguro activo: clic simulado (sin acción real).", "WARNING")
 
-                self.page_manager.record(parsed.question, parsed.options[best_idx])
+                    self.page_manager.record(parsed.question, parsed.options[best_idx])
 
-                if self.config.get("auto_scroll", False):
-                    self.execute_scroll_action()
+                    if self.config.get("auto_scroll", False):
+                        self.execute_scroll_action()
+            else:
+                self.log("No se pudo mapear la respuesta seleccionada con ninguna opción del DOM.", "WARNING")
         else:
-            self.log("No se pudo mapear la respuesta seleccionada con ninguna opción del DOM.", "WARNING")
+            self.log("No hay opciones del DOM disponibles para ejecutar clic.", "WARNING")
 
         run_data = {
             "timestamp": time.strftime("%H:%M:%S"),
@@ -317,20 +469,25 @@ class BotRunner:
             "answer": {
                 "answer": answer.answer,
                 "confidence": answer.confidence,
-                "reason": answer.reason,
+                "reason": answer.reasoning,
+                "think_time_ms": answer.think_time_ms,
             },
             "click_plan": click_plan_info,
+            "qwen_activated": qwen_activated,
+            "model_used": model_used,
+            "visual_descriptions": visual_descs,
+            "confidence_threshold": confidence_threshold,
         }
 
         self.last_run_info = run_data
         self.broadcast({"type": "result", "data": run_data})
         return run_data
 
-    def run_once_vision(self) -> dict[str, Any]:
+    def run_once_auto_vision(self) -> dict[str, Any]:
         from core.capture import capture_screen
         from core.ocr import run_ocr
 
-        self.log("Iniciando ciclo de resolucion (Vision)...", "INFO")
+        self.log("Iniciando ciclo de resolución inteligente (Visión/OCR)...", "INFO")
         self.apply_tesseract_path()
 
         reg = self.config["region"]
@@ -365,30 +522,74 @@ class BotRunner:
         self.log(f"OCR completo. Detectados {len(ocr.text)} caracteres.", "INFO")
         parsed = parse_question(ocr.text)
 
+        # --- FASE 1: Detección de Pregunta (OCR/Visión) ---
         self.log(f"Pregunta: {parsed.question or '[No detectada]'}", "INFO")
         if parsed.options:
             self.log(f"Opciones: {', '.join(parsed.options)}", "INFO")
         else:
             self.log("No se detectaron opciones.", "INFO")
 
-        client = OllamaClient(
-            model=self.config["model"],
-            host=ensure_http(self.config["ollama_host"]),
-        )
+        # --- Hybrid Pipeline ---
+        pipeline = self._build_pipeline()
 
-        if not client.is_available():
-            self.log(f"Ollama no disponible en {self.config['ollama_host']}", "ERROR")
-            raise Exception(f"Ollama no responde en {self.config['ollama_host']}. Abre Ollama e instala el modelo.")
+        # En modo Visión, la captura es el recurso visual para Qwen
+        media_paths = [str(capture.path)]
 
-        self.log(f"Consultando modelo '{self.config['model']}'...", "INFO")
-        try:
-            answer = client.choose_answer(parsed)
-        except Exception as e:
-            self.log(f"Error en consulta con Ollama: {str(e)}", "ERROR")
-            raise
+        # --- FASE 2: Evaluación de Suficiencia ---
+        has_visual = pipeline.detect_visual_content(parsed.question, parsed.options, media_paths, is_dom_mode=False)
+        
+        qwen_activated = False
+        visual_descs = None
+        
+        if not has_visual:
+            self.log("[FASE 2] Suficiencia: La pregunta es completamente textual (según palabras clave y contornos). Omitiendo Qwen.", "SUCCESS")
+            try:
+                answer, qwen_activated, visual_descs = pipeline.run(
+                    question=parsed.question,
+                    options=parsed.options,
+                    media_paths=[],
+                    is_dom_mode=False,
+                    ocr_texts=None,
+                    ocr_context="",
+                )
+            except Exception as e:
+                self.log(f"Error en pipeline híbrida: {str(e)}", "ERROR")
+                raise
+        else:
+            self.log("[FASE 3] Contenido visual relevante detectado en la captura de pantalla.", "INFO")
+            ocr_context = ocr.text
+            self.log(f"Ejecutando pipeline híbrida con visión (Reason: {self.config['reason_model']})...", "INFO")
+            try:
+                answer, qwen_activated, visual_descs = pipeline.run(
+                    question=parsed.question,
+                    options=parsed.options,
+                    media_paths=media_paths,
+                    is_dom_mode=False,
+                    ocr_texts=[ocr.text],
+                    ocr_context=ocr_context,
+                )
+            except Exception as e:
+                self.log(f"Error en pipeline híbrida: {str(e)}", "ERROR")
+                raise
+
+        model_used = self._pipeline_model_used(qwen_activated)
+        if qwen_activated:
+            self.log(f"Qwen2.5-VL activado para análisis visual.", "INFO")
 
         self.log(f"Respuesta elegida: '{answer.answer}' (Confianza: {answer.confidence:.2f})", "SUCCESS")
-        self.log(f"Explicacion: {answer.reason}", "INFO")
+        self.log(f"Razonamiento: {answer.reasoning}", "INFO")
+        self.log(f"Tiempo de razonamiento: {answer.think_time_ms} ms", "INFO")
+
+        # Confidence threshold warning
+        confidence_threshold = self.config.get("confidence_threshold", 0.70)
+        if answer.confidence < confidence_threshold:
+            self.log(
+                f"⚠ Confianza ({answer.confidence:.2f}) por debajo del umbral ({confidence_threshold:.2f}).",
+                "WARNING",
+            )
+
+        if self.config.get("log_reasoning", False):
+            self.log(f"[REASONING LOG] {answer.reasoning}", "INFO")
 
         click_plan_info = None
         clicked_successfully = False
@@ -455,9 +656,14 @@ class BotRunner:
             "answer": {
                 "answer": answer.answer,
                 "confidence": answer.confidence,
-                "reason": answer.reason,
+                "reason": answer.reasoning,
+                "think_time_ms": answer.think_time_ms,
             },
             "click_plan": click_plan_info,
+            "qwen_activated": qwen_activated,
+            "model_used": model_used,
+            "visual_descriptions": visual_descs,
+            "confidence_threshold": confidence_threshold,
         }
 
         self.last_run_info = run_data

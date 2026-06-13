@@ -2,11 +2,24 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from core.browser import BotBrowser
-from core.page_manager import PageManager
 from core.parser import ParsedQuestion
 
+try:
+    from core.page_manager import PageManager
+except ModuleNotFoundError as exc:
+    if exc.name != "pyautogui":
+        raise
+    PageManager = None
 
+try:
+    from core.browser import BotBrowser
+except ModuleNotFoundError as exc:
+    if exc.name != "playwright":
+        raise
+    BotBrowser = None
+
+
+@unittest.skipIf(BotBrowser is None, "playwright is not installed")
 class PlaywrightTests(unittest.TestCase):
     def setUp(self) -> None:
         self.example_html_path = Path(__file__).parent.parent / "docs" / "example.html"
@@ -74,6 +87,7 @@ class PlaywrightTests(unittest.TestCase):
         self.assertEqual(parsed2.options[1], "13")
 
 
+@unittest.skipIf(PageManager is None, "pyautogui is not installed")
 class PageManagerTests(unittest.TestCase):
     def test_page_manager_tracking(self) -> None:
         pm = PageManager(max_pages=5)

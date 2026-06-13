@@ -19,13 +19,12 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QTextEdit,
     QFrame,
-    QDesktopWidget,
     QGraphicsDropShadowEffect
 )
 from PyQt5.QtGui import QColor, QCursor, QPainter, QPen, QBrush, QFont
 
 from core.config import BotConfig, BotConfigUpdate
-from core.runner import BotRunner, BotRunnerThread, ensure_http
+from core.runner import BotRunner, BotRunnerThread
 
 
 class RegionSelector(QWidget):
@@ -119,7 +118,7 @@ class VisionBotWidget(QWidget):
     def init_ui(self) -> None:
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.resize(380, 480)
+        self.resize(420, 560)
 
         # Style sheet (Obsidian glassmorphism, nice buttons)
         self.setStyleSheet("""
@@ -265,7 +264,7 @@ class VisionBotWidget(QWidget):
         mode_layout = QHBoxLayout()
         mode_lbl = QLabel("Modo de trabajo:", self)
         self.cb_mode = QComboBox(self)
-        self.cb_mode.addItems(["Modo Visión", "Modo Playwright"])
+        self.cb_mode.addItems(["Modo Automático", "Modo Visión", "Modo Playwright"])
         self.cb_mode.currentTextChanged.connect(self.on_mode_changed)
         mode_layout.addWidget(mode_lbl)
         mode_layout.addWidget(self.cb_mode)
@@ -324,6 +323,32 @@ class VisionBotWidget(QWidget):
         layout.addWidget(log_lbl)
         layout.addWidget(self.log_panel)
 
+        # AI result details
+        details_frame = QFrame(self)
+        details_frame.setObjectName("DetailsFrame")
+        details_frame.setStyleSheet("""
+            QFrame#DetailsFrame {
+                background-color: #17171D;
+                border: 1px solid #282830;
+                border-radius: 8px;
+            }
+        """)
+        details_layout = QVBoxLayout(details_frame)
+        details_layout.setContentsMargins(10, 8, 10, 8)
+        details_layout.setSpacing(5)
+
+        details_title = QLabel("Detalle IA", self)
+        details_title.setStyleSheet("color: #FFFFFF; font-weight: bold;")
+        self.lbl_model_detail = QLabel("Modelo: -", self)
+        self.lbl_confidence_detail = QLabel("Confianza: -", self)
+        self.lbl_qwen_detail = QLabel("Qwen: -", self)
+
+        details_layout.addWidget(details_title)
+        details_layout.addWidget(self.lbl_model_detail)
+        details_layout.addWidget(self.lbl_confidence_detail)
+        details_layout.addWidget(self.lbl_qwen_detail)
+        layout.addWidget(details_frame)
+
         # Bottom Bar: Status Indicators & Diagnostics
         bottom_layout = QHBoxLayout()
         self.lbl_status = QLabel("● Inactivo", self)
@@ -351,12 +376,16 @@ class VisionBotWidget(QWidget):
     def load_config_to_ui(self) -> None:
         """Load persistent config values into UI fields."""
         config = BotConfig.load()
-        if config.mode == "playwright":
-            self.cb_mode.setCurrentIndex(1)
+        if config.mode == "auto":
+            self.cb_mode.setCurrentIndex(0)
+            self.url_widget.show()
+            self.region_widget.show()
+        elif config.mode == "playwright":
+            self.cb_mode.setCurrentIndex(2)
             self.url_widget.show()
             self.region_widget.hide()
-        else:
-            self.cb_mode.setCurrentIndex(0)
+        else: # vision
+            self.cb_mode.setCurrentIndex(1)
             self.url_widget.hide()
             self.region_widget.show()
 
@@ -368,10 +397,24 @@ class VisionBotWidget(QWidget):
         else:
             self.lbl_region_status.setText("Región: Completa")
 
+        self.update_ai_details(
+            model_used=config.reason_model,
+            confidence=None,
+            qwen_activated=False,
+            threshold=config.confidence_threshold,
+            reason="Sin resultado todavia.",
+        )
+
     def save_ui_to_config(self) -> BotConfig:
         """Save UI fields back into persistent configuration."""
         config = BotConfig.load()
-        config.mode = "playwright" if self.cb_mode.currentIndex() == 1 else "vision"
+        idx = self.cb_mode.currentIndex()
+        if idx == 0:
+            config.mode = "auto"
+        elif idx == 2:
+            config.mode = "playwright"
+        else:
+            config.mode = "vision"
         config.url = self.txt_url.text().strip()
         config.save()
         
@@ -391,7 +434,13 @@ class VisionBotWidget(QWidget):
             self.lbl_ollama_status.setStyleSheet("color: #00F260; font-weight: bold;")
             models = status.get("ollama_models", [])
             model_info = ", ".join(models) if models else "No models found"
-            self.lbl_ollama_status.setToolTip(f"Ollama Conectado. Modelos: {model_info}")
+            reason_state = "OK" if status.get("reason_model_available") else "No encontrado"
+            vision_state = "OK" if status.get("vision_model_available") else "No encontrado"
+            self.lbl_ollama_status.setToolTip(
+                f"Ollama Conectado. Modelos: {model_info}\n"
+                f"Reason: {self.runner.config.get('reason_model')} ({reason_state})\n"
+                f"Qwen: {self.runner.config.get('vision_model')} ({vision_state})"
+            )
         else:
             self.lbl_ollama_status.setStyleSheet("color: #FF416C; font-weight: bold;")
             self.lbl_ollama_status.setToolTip("Ollama desconectado. ¿Está corriendo en el puerto 11434?")
@@ -404,11 +453,52 @@ class VisionBotWidget(QWidget):
             self.lbl_tess_status.setStyleSheet("color: #FF416C; font-weight: bold;")
             self.lbl_tess_status.setToolTip(f"No se encontró Tesseract en: {self.runner.config.get('tesseract_cmd')}")
 
+        self.update_ai_details(
+            model_used=self.runner.config.get("reason_model", "-"),
+            confidence=None,
+            qwen_activated=False,
+            threshold=self.runner.config.get("confidence_threshold", 0.70),
+            reason="Esperando resultado de la pipeline.",
+        )
+
+    def update_ai_details(
+        self,
+        model_used: str,
+        confidence: float | None,
+        qwen_activated: bool,
+        threshold: float,
+        reason: str,
+    ) -> None:
+        """Refresh model, confidence, and Qwen diagnostics."""
+        self.lbl_model_detail.setText(f"Modelo: {model_used or '-'}")
+
+        if confidence is None:
+            self.lbl_confidence_detail.setText(f"Confianza: - (umbral {threshold:.0%})")
+            self.lbl_confidence_detail.setStyleSheet("color: #B3B3C2;")
+        else:
+            confidence_text = f"{confidence:.0%}"
+            self.lbl_confidence_detail.setText(f"Confianza: {confidence_text} (umbral {threshold:.0%})")
+            color = "#00F260" if confidence >= threshold else "#f7971e"
+            self.lbl_confidence_detail.setStyleSheet(f"color: {color}; font-weight: bold;")
+
+        qwen_text = "activo" if qwen_activated else "omitido"
+        qwen_color = "#00F260" if qwen_activated else "#7A7A8A"
+        self.lbl_qwen_detail.setText(f"Qwen: {qwen_text}")
+        self.lbl_qwen_detail.setStyleSheet(f"color: {qwen_color}; font-weight: bold;")
+
+        tooltip = reason or "Sin razonamiento disponible."
+        self.lbl_model_detail.setToolTip(tooltip)
+        self.lbl_confidence_detail.setToolTip(tooltip)
+        self.lbl_qwen_detail.setToolTip(tooltip)
+
     def on_mode_changed(self, mode_text: str) -> None:
-        if mode_text == "Modo Playwright":
+        if mode_text == "Modo Automático":
+            self.url_widget.show()
+            self.region_widget.show()
+        elif mode_text == "Modo Playwright":
             self.url_widget.show()
             self.region_widget.hide()
-        else:
+        else: # Modo Visión
             self.url_widget.hide()
             self.region_widget.show()
         self.save_ui_to_config()
@@ -455,6 +545,17 @@ class VisionBotWidget(QWidget):
         if not status.get("ollama_available"):
             self.append_log("ERROR: Servidor Ollama no está disponible. No se puede iniciar.", "ERROR")
             return
+        if not status.get("reason_model_available"):
+            self.append_log(
+                f"ERROR: Modelo de razonamiento no encontrado: {self.runner.config.get('reason_model')}",
+                "ERROR",
+            )
+            return
+        if self.runner.config.get("vision_enabled", True) and not status.get("vision_model_available"):
+            self.append_log(
+                f"WARNING: Qwen no encontrado: {self.runner.config.get('vision_model')}. La pipeline seguira sin analisis visual.",
+                "WARNING",
+            )
 
         self.btn_start.setEnabled(False)
         self.btn_pause.setEnabled(True)
@@ -514,8 +615,21 @@ class VisionBotWidget(QWidget):
 
     @pyqtSlot(dict)
     def on_runner_result(self, result: dict) -> None:
-        # Optional: update UI indicators using result data
-        pass
+        answer = result.get("answer", {})
+        confidence = answer.get("confidence")
+        try:
+            confidence_value = float(confidence) if confidence is not None else None
+        except (TypeError, ValueError):
+            confidence_value = None
+
+        reason = str(answer.get("reason") or "")
+        self.update_ai_details(
+            model_used=str(result.get("model_used") or self.runner.config.get("reason_model", "-")),
+            confidence=confidence_value,
+            qwen_activated=bool(result.get("qwen_activated")),
+            threshold=float(result.get("confidence_threshold") or self.runner.config.get("confidence_threshold", 0.70)),
+            reason=reason,
+        )
 
     def append_log(self, message: str, level: str = "INFO") -> None:
         color = "#D2D2DC"
