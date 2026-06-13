@@ -170,18 +170,46 @@ class BotBrowser:
                 options.push(labelText);
                 selectors.push(getUniqueSelector(input));
             }
+
+            const mediaSelectors = [];
+            const mediaElements = Array.from(targetContainer.querySelectorAll('img, svg, canvas'));
+            for (const el of mediaElements) {
+                const rect = el.getBoundingClientRect();
+                if (rect.width > 0 && rect.width < 20 && rect.height > 0 && rect.height < 20) {
+                    continue;
+                }
+                mediaSelectors.push(getUniqueSelector(el));
+            }
             
             return {
                 question: questionText,
                 options: options,
-                selectors: selectors
+                selectors: selectors,
+                media_selectors: mediaSelectors
             };
         }
         """
         try:
-            return self.page.evaluate(js_extractor)
+            data = self.page.evaluate(js_extractor)
+            if not data:
+                return None
+
+            import base64
+            media_base64 = []
+            for sel in data.get("media_selectors", []):
+                try:
+                    locator = self.page.locator(sel).first
+                    locator.wait_for(state="attached", timeout=1000)
+                    img_bytes = locator.screenshot()
+                    b64_str = base64.b64encode(img_bytes).decode("utf-8")
+                    media_base64.append(b64_str)
+                except Exception as img_err:
+                    print(f"[BROWSER WARNING] No se pudo capturar la imagen {sel}: {img_err}")
+
+            data["media"] = media_base64
+            return data
         except Exception as e:
-            print(f"[BROWSER ERROR] Failed to evaluate page: {e}")
+            print(f"[BROWSER ERROR] Falló la evaluación de la página o captura de media: {e}")
             return None
 
     def click_option(self, selector: str) -> None:

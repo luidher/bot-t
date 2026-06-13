@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from core.actions import execute_click, plan_click_for_answer, execute_playwright_click
 from core.ai import OllamaClient
+from core.pipeline import AIPipeline
 from core.config import BotConfig, BotConfigUpdate, default_config_dict, merge_config
 from core.parser import parse_question, ParsedQuestion
 from core.browser import BotBrowser
@@ -235,6 +236,9 @@ class BotRunner:
                         "reason": "Todas las preguntas resueltas.",
                     },
                     "click_plan": None,
+                    "think_time_ms": 0,
+                    "qwen_activated": False,
+                    "model_used": "ninguno",
                 }
                 self.last_run_info = run_data
                 self.broadcast({"type": "result", "data": run_data})
@@ -247,52 +251,55 @@ class BotRunner:
         else:
             self.log("No se detectaron opciones.", "INFO")
 
-        client = OllamaClient(
-            model=self.config["model"],
-            host=ensure_http(self.config["ollama_host"]),
-        )
+        bot_config = BotConfig.model_validate(self.config)
+        pipeline = AIPipeline(bot_config)
 
-        if not client.is_available():
+        if not pipeline.reason_client.is_available():
             self.log(f"Ollama no disponible en {self.config['ollama_host']}", "ERROR")
             raise Exception(f"Ollama no responde en {self.config['ollama_host']}. Abre Ollama e instala el modelo.")
 
-        self.log(f"Consultando modelo '{self.config['model']}'...", "INFO")
+        self.log(f"Consultando sistema híbrido de IA...", "INFO")
         try:
-            answer = client.choose_answer(parsed)
+            pipeline_result = pipeline.run(parsed, is_ocr_mode=False)
         except Exception as e:
             self.log(f"Error en consulta con Ollama: {str(e)}", "ERROR")
             raise
 
-        self.log(f"Respuesta elegida: '{answer.answer}' (Confianza: {answer.confidence:.2f})", "SUCCESS")
-        self.log(f"Explicacion: {answer.reason}", "INFO")
+        self.log(f"Respuesta elegida: '{pipeline_result['answer']}' (Confianza: {pipeline_result['confidence']:.2f})", "SUCCESS")
+        self.log(f"Explicacion: {pipeline_result['reasoning']}", "INFO")
+
+        # Fase 5: Validación
+        confidence = pipeline_result["confidence"]
+        if confidence < bot_config.confidence_threshold:
+            self.log(f"[WARNING] Confianza {confidence:.2f} por debajo del umbral ({bot_config.confidence_threshold:.2f}).", "WARNING")
 
         click_plan_info = None
-        # Match option
-        from core.actions import _similarity
         best_idx = -1
-        best_score = 0.0
+        
+        # Verificar que coincida exactamente con una opción
         for idx, opt in enumerate(parsed.options):
-            score = _similarity(answer.answer, opt)
-            if score > best_score:
-                best_score = score
+            if opt == pipeline_result["answer"]:
                 best_idx = idx
+                break
 
-        if best_idx != -1 and best_score >= self.config.get("min_click_score", 0.58):
+        if best_idx == -1 and parsed.options:
+            self.log(f"Error de validación: La respuesta de la IA '{pipeline_result['answer']}' no coincide exactamente con ninguna de las opciones disponibles.", "ERROR")
+            # Continuar de forma segura sin hacer clic
+        elif best_idx != -1:
             selector = parsed.selectors[best_idx]
             click_plan_info = {
                 "target_text": parsed.options[best_idx],
-                "score": best_score,
+                "score": 1.0,
                 "selector": selector,
                 "dry_run": not self.config["i_am_authorized"],
             }
             self.log(
-                f"Plan de interacción: hacer clic en '{parsed.options[best_idx]}' [Selector: {selector}, Score: {best_score:.2f}]",
+                f"Plan de interacción: hacer clic en '{parsed.options[best_idx]}' [Selector: {selector}]",
                 "INFO",
             )
 
             if self.config.get("confirm", False):
                 self.log("Requiere confirmacion del usuario para proceder.", "WARNING")
-                # Store pending playwright click plan
                 self.pending_click_plan = click_plan_info
                 self.broadcast({"type": "pending_confirm", "plan": click_plan_info})
             else:
@@ -307,19 +314,20 @@ class BotRunner:
 
                 if self.config.get("auto_scroll", False):
                     self.execute_scroll_action()
-        else:
-            self.log("No se pudo mapear la respuesta seleccionada con ninguna opción del DOM.", "WARNING")
 
         run_data = {
             "timestamp": time.strftime("%H:%M:%S"),
             "question": parsed.question,
             "options": parsed.options,
             "answer": {
-                "answer": answer.answer,
-                "confidence": answer.confidence,
-                "reason": answer.reason,
+                "answer": pipeline_result["answer"],
+                "confidence": pipeline_result["confidence"],
+                "reason": pipeline_result["reasoning"],
             },
             "click_plan": click_plan_info,
+            "think_time_ms": pipeline_result["think_time_ms"],
+            "qwen_activated": pipeline_result["qwen_activated"],
+            "model_used": f"{bot_config.vision_model} + {bot_config.reason_model}" if pipeline_result["qwen_activated"] else bot_config.reason_model
         }
 
         self.last_run_info = run_data
@@ -329,6 +337,8 @@ class BotRunner:
     def run_once_vision(self) -> dict[str, Any]:
         from core.capture import capture_screen
         from core.ocr import run_ocr
+        import io
+        import base64
 
         self.log("Iniciando ciclo de resolucion (Vision)...", "INFO")
         self.apply_tesseract_path()
@@ -363,7 +373,13 @@ class BotRunner:
             raise
 
         self.log(f"OCR completo. Detectados {len(ocr.text)} caracteres.", "INFO")
-        parsed = parse_question(ocr.text)
+
+        # Convert image to base64
+        buffered = io.BytesIO()
+        capture.image.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+        parsed = parse_question(ocr.text, media=[img_str])
 
         self.log(f"Pregunta: {parsed.question or '[No detectada]'}", "INFO")
         if parsed.options:
@@ -371,34 +387,48 @@ class BotRunner:
         else:
             self.log("No se detectaron opciones.", "INFO")
 
-        client = OllamaClient(
-            model=self.config["model"],
-            host=ensure_http(self.config["ollama_host"]),
-        )
+        bot_config = BotConfig.model_validate(self.config)
+        pipeline = AIPipeline(bot_config)
 
-        if not client.is_available():
+        if not pipeline.reason_client.is_available():
             self.log(f"Ollama no disponible en {self.config['ollama_host']}", "ERROR")
             raise Exception(f"Ollama no responde en {self.config['ollama_host']}. Abre Ollama e instala el modelo.")
 
-        self.log(f"Consultando modelo '{self.config['model']}'...", "INFO")
+        self.log(f"Consultando sistema híbrido de IA...", "INFO")
         try:
-            answer = client.choose_answer(parsed)
+            pipeline_result = pipeline.run(parsed, is_ocr_mode=True)
         except Exception as e:
             self.log(f"Error en consulta con Ollama: {str(e)}", "ERROR")
             raise
 
-        self.log(f"Respuesta elegida: '{answer.answer}' (Confianza: {answer.confidence:.2f})", "SUCCESS")
-        self.log(f"Explicacion: {answer.reason}", "INFO")
+        self.log(f"Respuesta elegida: '{pipeline_result['answer']}' (Confianza: {pipeline_result['confidence']:.2f})", "SUCCESS")
+        self.log(f"Explicacion: {pipeline_result['reasoning']}", "INFO")
+
+        # Fase 5: Validación
+        confidence = pipeline_result["confidence"]
+        if confidence < bot_config.confidence_threshold:
+            self.log(f"[WARNING] Confianza {confidence:.2f} por debajo del umbral ({bot_config.confidence_threshold:.2f}).", "WARNING")
 
         click_plan_info = None
         clicked_successfully = False
-        if self.config["click"]:
+        best_idx = -1
+        
+        # Verificar que coincida exactamente con una opción
+        for idx, opt in enumerate(parsed.options):
+            if opt == pipeline_result["answer"]:
+                best_idx = idx
+                break
+
+        if best_idx == -1 and parsed.options:
+            self.log(f"Error de validación: La respuesta de la IA '{pipeline_result['answer']}' no coincide exactamente con ninguna de las opciones disponibles.", "ERROR")
+            # Continuar de forma segura sin hacer clic
+        elif self.config["click"] and best_idx != -1:
             offset = (region_tuple[0], region_tuple[1]) if region_tuple else (0, 0)
             dry_run = not self.config["i_am_authorized"]
 
             self.log("Calculando coordenadas para el clic...", "INFO")
             plan = plan_click_for_answer(
-                answer.answer,
+                pipeline_result["answer"],
                 ocr.boxes,
                 region_offset=offset,
                 min_score=self.config["min_click_score"],
@@ -432,7 +462,7 @@ class BotRunner:
                         self.log("Clic enviado exitosamente.", "SUCCESS")
                         clicked_successfully = True
 
-                    self.page_manager.record(parsed.question, answer.answer)
+                    self.page_manager.record(parsed.question, pipeline_result["answer"])
 
                     if self.config.get("auto_scroll", False):
                         self.execute_scroll_action()
@@ -453,11 +483,14 @@ class BotRunner:
             "question": parsed.question,
             "options": parsed.options,
             "answer": {
-                "answer": answer.answer,
-                "confidence": answer.confidence,
-                "reason": answer.reason,
+                "answer": pipeline_result["answer"],
+                "confidence": pipeline_result["confidence"],
+                "reason": pipeline_result["reasoning"],
             },
             "click_plan": click_plan_info,
+            "think_time_ms": pipeline_result["think_time_ms"],
+            "qwen_activated": pipeline_result["qwen_activated"],
+            "model_used": f"{bot_config.vision_model} + {bot_config.reason_model}" if pipeline_result["qwen_activated"] else bot_config.reason_model
         }
 
         self.last_run_info = run_data

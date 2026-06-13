@@ -316,6 +316,41 @@ class VisionBotWidget(QWidget):
         actions_layout.addWidget(self.btn_stop)
         layout.addLayout(actions_layout)
 
+        # Info panel for Hybrid AI Metrics
+        self.info_panel = QFrame(self)
+        self.info_panel.setStyleSheet("""
+            QFrame {
+                background-color: #1A1A22;
+                border: 1px solid #2D2D38;
+                border-radius: 8px;
+                padding: 4px;
+            }
+            QLabel {
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 10px;
+                font-weight: bold;
+            }
+        """)
+        info_layout = QHBoxLayout(self.info_panel)
+        info_layout.setContentsMargins(10, 4, 10, 4)
+        
+        self.lbl_model_used = QLabel("MODELO: -", self)
+        self.lbl_model_used.setStyleSheet("color: #B3B3C2;")
+        
+        self.lbl_qwen_status = QLabel("QWEN: APAGADO", self)
+        self.lbl_qwen_status.setStyleSheet("color: #7A7A8A;")
+        
+        self.lbl_confidence = QLabel("CONFIANZA: -", self)
+        self.lbl_confidence.setStyleSheet("color: #B3B3C2;")
+        
+        info_layout.addWidget(self.lbl_model_used)
+        info_layout.addStretch()
+        info_layout.addWidget(self.lbl_qwen_status)
+        info_layout.addStretch()
+        info_layout.addWidget(self.lbl_confidence)
+        
+        layout.addWidget(self.info_panel)
+
         # Real-time Log Panel
         log_lbl = QLabel("Registros de Eventos:", self)
         self.log_panel = QTextEdit(self)
@@ -456,6 +491,23 @@ class VisionBotWidget(QWidget):
             self.append_log("ERROR: Servidor Ollama no está disponible. No se puede iniciar.", "ERROR")
             return
 
+        # Check model availability in Ollama
+        ollama_models = status.get("ollama_models", [])
+        def is_model_installed(target_name: str) -> bool:
+            target_clean = target_name.lower().strip()
+            for m in ollama_models:
+                m_clean = m.lower().strip()
+                if target_clean == m_clean or f"{target_clean}:latest" == m_clean or m_clean.startswith(target_clean) or target_clean.startswith(m_clean.split(":")[0]):
+                    return True
+            return False
+
+        if not is_model_installed(config.vision_model):
+            self.append_log(f"ERROR: El modelo visual '{config.vision_model}' no está disponible en Ollama.", "ERROR")
+            return
+        if not is_model_installed(config.reason_model):
+            self.append_log(f"ERROR: El modelo de razonamiento '{config.reason_model}' no está disponible en Ollama.", "ERROR")
+            return
+
         self.btn_start.setEnabled(False)
         self.btn_pause.setEnabled(True)
         self.btn_stop.setEnabled(True)
@@ -514,8 +566,31 @@ class VisionBotWidget(QWidget):
 
     @pyqtSlot(dict)
     def on_runner_result(self, result: dict) -> None:
-        # Optional: update UI indicators using result data
-        pass
+        model_used = result.get("model_used", "-")
+        qwen_active = "ACTIVO" if result.get("qwen_activated", False) else "APAGADO"
+        
+        answer_data = result.get("answer", {})
+        confidence = answer_data.get("confidence", 0.0)
+        
+        self.lbl_model_used.setText(f"MODELO: {model_used.upper()}")
+        self.lbl_qwen_status.setText(f"QWEN: {qwen_active}")
+        
+        if result.get("qwen_activated", False):
+            self.lbl_qwen_status.setStyleSheet("color: #00F260; font-weight: bold;")
+        else:
+            self.lbl_qwen_status.setStyleSheet("color: #7A7A8A;")
+            
+        if result.get("question") == "[No detectada / Fin de formulario]":
+            self.lbl_confidence.setText("CONFIANZA: -")
+            self.lbl_confidence.setStyleSheet("color: #B3B3C2;")
+        else:
+            self.lbl_confidence.setText(f"CONFIANZA: {confidence:.2f}")
+            if confidence >= 0.70:
+                self.lbl_confidence.setStyleSheet("color: #00F260; font-weight: bold;")
+            elif confidence >= 0.50:
+                self.lbl_confidence.setStyleSheet("color: #f7971e; font-weight: bold;")
+            else:
+                self.lbl_confidence.setStyleSheet("color: #FF416C; font-weight: bold;")
 
     def append_log(self, message: str, level: str = "INFO") -> None:
         color = "#D2D2DC"

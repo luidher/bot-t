@@ -87,5 +87,31 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(events[-1]["type"], "config")
 
 
+class PipelineTests(unittest.TestCase):
+    def test_has_visual_content_keywords(self) -> None:
+        from core.pipeline import has_visual_content
+        from core.parser import ParsedQuestion
+
+        # Visual keyword in question
+        parsed = ParsedQuestion(question="¿Qué se observa en la tabla siguiente?", options=["Op1", "Op2"], raw_lines=[])
+        self.assertTrue(has_visual_content(parsed, is_ocr_mode=True))
+
+        # Visual keyword in option
+        parsed = ParsedQuestion(question="Seleccione la opción", options=["La gráfica muestra crecimiento", "Op2"], raw_lines=[])
+        self.assertTrue(has_visual_content(parsed, is_ocr_mode=True))
+
+        # No visual keywords
+        parsed = ParsedQuestion(question="¿Cuál es la capital de Italia?", options=["Roma", "Milán"], raw_lines=[])
+        self.assertFalse(has_visual_content(parsed, is_ocr_mode=True))
+
+    def test_has_visual_content_media_in_dom(self) -> None:
+        from core.pipeline import has_visual_content
+        from core.parser import ParsedQuestion
+
+        # Media present, DOM mode -> True
+        parsed = ParsedQuestion(question="Pregunta", options=["Op1"], raw_lines=[], media=["base64img"])
+        self.assertTrue(has_visual_content(parsed, is_ocr_mode=False))
+
+
 if __name__ == "__main__":
     unittest.main()
