@@ -8,6 +8,7 @@ from core.actions import execute_click, plan_click_for_answer
 from core.ai import is_model_available
 from core.capture import Region, capture_screen
 from core.config import BotConfig
+from core.media_extractor import MediaItem
 from core.ocr import run_ocr
 from core.parser import parse_question
 from core.pipeline import DecisionPipeline
@@ -92,14 +93,14 @@ def run_once(
     else:
         print("[sin opciones detectadas]")
 
-    # Execute pipeline (media_paths is the screenshot for OCR mode)
-    media_paths = [str(capture.path)]
+    # Execute pipeline (the screenshot is the visual resource for OCR mode)
+    media_items = [MediaItem(path=str(capture.path), role="question", selector="screen_capture")]
 
     try:
         answer, qwen_activated, visual_descs = pipeline.run(
             question=parsed.question,
             options=parsed.options,
-            media_paths=media_paths,
+            media_items=media_items,
             is_dom_mode=False,
         )
     except Exception as e:

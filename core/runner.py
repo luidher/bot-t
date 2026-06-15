@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from core.actions import execute_click, plan_click_for_answer
 from core.ai import is_model_available
 from core.config import BotConfig, BotConfigUpdate, default_config_dict, merge_config
+from core.media_extractor import MediaItem, extract_media
 from core.parser import parse_question, ParsedQuestion
 from core.browser import BotBrowser
 from core.page_manager import PageManager
@@ -279,9 +280,19 @@ class BotRunner:
                 return run_data
 
         parsed = ParsedQuestion.from_dom(page_data)
+        media_items: list[MediaItem] = []
+        if self.config.get("vision_enabled", True) and self.browser and self.browser.page:
+            try:
+                media_items = extract_media(
+                    self.browser.page,
+                    parsed.question_selector or "body",
+                    parsed.option_selectors or parsed.selectors,
+                )
+            except Exception as e:
+                self.log(f"[MEDIA WARNING] Error al extraer recursos visuales: {e}", "WARNING")
         
         # --- FASE 1: Detección de Pregunta ---
-        visual_elements_detected = len(parsed.media_elements) > 0
+        visual_elements_detected = len(media_items) > 0
         phase1_result = {
             "question_detected": bool(parsed.question),
             "options_detected": len(parsed.options) > 0,
@@ -304,7 +315,7 @@ class BotRunner:
                 answer, qwen_activated, visual_descs = pipeline.run(
                     question=parsed.question,
                     options=parsed.options,
-                    media_paths=[],
+                    media_items=[],
                     is_dom_mode=True,
                     ocr_texts=None,
                     ocr_context="",
@@ -315,69 +326,7 @@ class BotRunner:
         else:
             # Hay elementos visuales
             # --- FASE 3: Detección de Contenido Visual ---
-            self.log(f"[FASE 3] Contenido Visual: Detectados {len(parsed.media_elements)} elementos visuales.", "INFO")
-            
-            # --- FASE 4: Scroll Inteligente ---
-            self.log("[FASE 4] Scroll Inteligente: Desplazando al contenido visual...", "INFO")
-            try:
-                first_selector = parsed.media_elements[0]["selector"]
-                self.browser.page.locator(first_selector).first.scroll_into_view_if_needed()
-                time.sleep(1.5)  # Esperar que cargue/estabilice
-                # Reinspeccionar DOM
-                page_data = self.browser.read_page()
-                parsed = ParsedQuestion.from_dom(page_data)
-                self.log("[FASE 4] Reinspección del DOM completada.", "INFO")
-            except Exception as e:
-                self.log(f"[FASE 4 WARNING] Error al desplazar/reinspeccionar: {e}", "WARNING")
-
-            # --- FASE 5 & 6: Evaluación de Accesibilidad e OCR bajo demanda ---
-            media_paths: list[str] = []
-            ocr_texts_list: list[str] = []
-            Path("screenshots").mkdir(exist_ok=True)
-
-            if self.config.get("vision_enabled", True):
-                for idx, elem in enumerate(parsed.media_elements):
-                    out_path = Path("screenshots") / f"media_element_{idx}.png"
-                    selector = elem["selector"]
-                    tag = elem["tagName"]
-                    src = elem["src"]
-                    
-                    self.log(f"[FASE 3] Procesando recurso visual #{idx + 1} ({tag}) [Selector: {selector}]", "INFO")
-                    
-                    # Intentar captura del elemento
-                    if self.browser.screenshot_element(selector, out_path):
-                        media_paths.append(str(out_path))
-                        
-                        # Fase 5: ¿Es accesible directamente?
-                        # Si es etiqueta img con src válido y no está vacío, asumimos accesible directamente.
-                        if tag == "img" and src and not src.startswith("data:"):
-                            self.log(f"[FASE 5] Imagen accesible directamente ({tag}). Omitiendo OCR.", "INFO")
-                            ocr_texts_list.append("")
-                        else:
-                            # Fase 6: OCR Bajo Demanda
-                            self.log(f"[FASE 6] Elemento inaccesible directamente ({tag}). Ejecutando OCR bajo demanda...", "WARNING")
-                            try:
-                                from core.ocr import run_ocr
-                                ocr_res = run_ocr(
-                                    out_path,
-                                    lang=self.config["lang"],
-                                    psm=self.config["psm"],
-                                    preprocess=not self.config["no_preprocess"]
-                                )
-                                text_found = ocr_res.text.strip()
-                                if text_found:
-                                    self.log(f"[FASE 6] OCR completado. Texto detectado: '{text_found[:80]}...'", "SUCCESS")
-                                    ocr_texts_list.append(text_found)
-                                else:
-                                    self.log("[FASE 6] OCR completado. No se detectó texto en el elemento.", "INFO")
-                                    ocr_texts_list.append("")
-                            except Exception as e:
-                                self.log(f"[FASE 6 ERROR] Error en OCR: {e}", "ERROR")
-                                ocr_texts_list.append("")
-                    else:
-                        self.log(f"[VISION WARNING] Falló captura de pantalla del elemento: {selector}", "WARNING")
-
-            ocr_context = "\n".join(t for t in ocr_texts_list if t)
+            self.log(f"[FASE 3] Contenido Visual: Detectados {len(media_items)} elementos visuales.", "INFO")
 
             # --- FASES 7 & 8: Análisis Visual y Razonamiento/Validación ---
             self.log(f"Ejecutando pipeline híbrida (Reason: {self.config['reason_model']})...", "INFO")
@@ -385,10 +334,10 @@ class BotRunner:
                 answer, qwen_activated, visual_descs = pipeline.run(
                     question=parsed.question,
                     options=parsed.options,
-                    media_paths=media_paths,
+                    media_items=media_items,
                     is_dom_mode=True,
-                    ocr_texts=ocr_texts_list,
-                    ocr_context=ocr_context,
+                    ocr_texts=None,
+                    ocr_context="",
                 )
             except Exception as e:
                 self.log(f"Error en pipeline híbrida: {str(e)}", "ERROR")
@@ -533,10 +482,10 @@ class BotRunner:
         pipeline = self._build_pipeline()
 
         # En modo Visión, la captura es el recurso visual para Qwen
-        media_paths = [str(capture.path)]
+        media_items = [MediaItem(path=str(capture.path), role="question", selector="screen_capture")]
 
         # --- FASE 2: Evaluación de Suficiencia ---
-        has_visual = pipeline.detect_visual_content(parsed.question, parsed.options, media_paths, is_dom_mode=False)
+        has_visual = pipeline.detect_visual_content(parsed.question, parsed.options, media_items, is_dom_mode=False)
         
         qwen_activated = False
         visual_descs = None
@@ -547,7 +496,7 @@ class BotRunner:
                 answer, qwen_activated, visual_descs = pipeline.run(
                     question=parsed.question,
                     options=parsed.options,
-                    media_paths=[],
+                    media_items=[],
                     is_dom_mode=False,
                     ocr_texts=None,
                     ocr_context="",
@@ -563,7 +512,7 @@ class BotRunner:
                 answer, qwen_activated, visual_descs = pipeline.run(
                     question=parsed.question,
                     options=parsed.options,
-                    media_paths=media_paths,
+                    media_items=media_items,
                     is_dom_mode=False,
                     ocr_texts=[ocr.text],
                     ocr_context=ocr_context,

@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
+from core.media_extractor import MediaItem
+
 
 class VisionAnalyzer:
     def __init__(
@@ -19,7 +21,7 @@ class VisionAnalyzer:
 
     def analyze_image(
         self,
-        image_path: str | Path,
+        media_item: MediaItem,
         question: str,
         options: list[str],
         ocr_text: Optional[str] = None,
@@ -27,7 +29,7 @@ class VisionAnalyzer:
         import requests
 
         try:
-            image_path = Path(image_path)
+            image_path = Path(media_item.path)
             if not image_path.exists():
                 print(f"[VISION ERROR] La ruta de la imagen no existe: {image_path}")
                 return None
@@ -37,7 +39,7 @@ class VisionAnalyzer:
                 img_data = f.read()
             b64_str = base64.b64encode(img_data).decode("utf-8")
 
-            prompt = build_vision_prompt(question, options, ocr_text=ocr_text)
+            prompt = build_vision_prompt(question, options, media_item=media_item, ocr_text=ocr_text)
             payload = {
                 "model": self.model,
                 "prompt": prompt,
@@ -64,13 +66,33 @@ class VisionAnalyzer:
             return None
 
 
-def build_vision_prompt(question: str, options: list[str], ocr_text: Optional[str] = None) -> str:
+def build_vision_prompt(
+    question: str,
+    options: list[str],
+    media_item: MediaItem,
+    ocr_text: Optional[str] = None,
+) -> str:
     options_str = "\n".join(f"- {o}" for o in options)
     ocr_block = f"\nTexto extraído por OCR de la imagen:\n{ocr_text}\n" if ocr_text else ""
+    if media_item.role == "option":
+        focus = f"""
+La imagen corresponde a la opción {media_item.option_label or "?"}.
+Describe rasgos comparables de esa opción: texto visible, forma, color, símbolos, números, etiquetas, orientación, valores y cualquier diferencia objetiva frente a otras opciones.
+No analices todavía si esta opción es correcta.
+""".strip()
+    else:
+        focus = """
+La imagen pertenece al enunciado de la pregunta.
+Describe con detalle la información necesaria para entender el problema: tablas, ejes, etiquetas, fórmulas, diagramas, objetos, relaciones espaciales, cantidades y datos visibles.
+""".strip()
+
     return f"""
 Eres un asistente de análisis visual especializado en la descripción estructurada de imágenes.
 Analiza la imagen proporcionada en el contexto de la siguiente pregunta y opciones.
 Tu tarea es exclusivamente extraer y describir la información visual relevante de la imagen (por ejemplo: contenido de tablas, datos de gráficos, diagramas, fórmulas, conteo de objetos o elementos visuales clave).
+
+Enfoque específico:
+{focus}
 
 Pregunta:
 {question}

@@ -89,7 +89,7 @@ class OllamaClient:
 
 def build_prompt(parsed: ParsedQuestion, context: str = "", ocr_context: str = "") -> str:
     options = "\n".join(f"{idx + 1}. {option}" for idx, option in enumerate(parsed.options))
-    context_block = f"\nInformación visual de la imagen (descripción estructurada):\n{context}\n" if context else ""
+    context_block = f"\nInformación visual estructurada en texto plano:\n{context}\n" if context else ""
     ocr_block = f"\nTexto adicional extraído por OCR desde elementos inaccesibles/canvas/svg/iframe:\n{ocr_context}\n" if ocr_context else ""
 
     return f"""
