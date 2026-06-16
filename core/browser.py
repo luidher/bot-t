@@ -1,6 +1,6 @@
 """Playwright browser automation module for DOM-based reading and interaction."""
 from __future__ import annotations
-
+from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional
 from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page

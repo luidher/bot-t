@@ -1,5 +1,5 @@
 {
-    "mode": "vision",
+    "mode": "auto",
     "url": "https://pruebat.org/",
     "model": "deepseek-r1:8b",
     "ollama_host": "http://localhost:11434",
