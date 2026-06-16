@@ -9,6 +9,7 @@ import unittest
 from core.actions import plan_click_for_answer
 from core.ai import AIAnswer, parse_ai_answer
 from core.config import BotConfig, BotConfigUpdate, default_config_dict, merge_config
+from core.media_extractor import MediaItem
 from core.pipeline import DecisionPipeline
 from core.parser import parse_question
 
@@ -85,10 +86,10 @@ class PipelineTests(unittest.TestCase):
         pipeline = DecisionPipeline(BotConfig(vision_enabled=True))
         captured_context = {}
 
-        def fake_analyze_image(path: str, question: str, options: list[str], *args, **kwargs) -> dict:
+        def fake_analyze_image(item: MediaItem, question: str, options: list[str], *args, **kwargs) -> dict:
             return {
                 "tipo_contenido": "grafico",
-                "descripcion_visual": f"media={path}",
+                "descripcion_visual": f"media={item.path}",
                 "datos_extraidos": {"opciones": len(options)},
             }
 
@@ -102,7 +103,7 @@ class PipelineTests(unittest.TestCase):
         answer, qwen_activated, descriptions = pipeline.run(
             question="Que muestra la imagen?",
             options=["A", "B"],
-            media_paths=["chart.png"],
+            media_items=[MediaItem(path="chart.png", role="question", selector="#chart")],
             is_dom_mode=True,
         )
 
@@ -111,10 +112,42 @@ class PipelineTests(unittest.TestCase):
         self.assertIsNotNone(descriptions)
         self.assertIn("chart.png", captured_context["context"])
 
+    def test_visual_context_is_plain_text_ordered_by_media_role(self) -> None:
+        pipeline = DecisionPipeline(BotConfig(vision_enabled=True))
+        captured_context = {}
+
+        def fake_analyze_image(item: MediaItem, question: str, options: list[str], *args, **kwargs) -> dict:
+            return {
+                "tipo_contenido": "otro",
+                "descripcion_visual": f"descripcion de {item.role} {item.option_label or ''}".strip(),
+                "datos_extraidos": {"valor": item.option_label or "pregunta"},
+            }
+
+        def fake_choose_answer(parsed, context: str = "", *args, **kwargs) -> AIAnswer:
+            captured_context["context"] = context
+            return AIAnswer("B", 0.9, "usa contexto visual", "{}", 9)
+
+        pipeline.vision_analyzer.analyze_image = fake_analyze_image
+        pipeline.ai_client.choose_answer = fake_choose_answer
+
+        pipeline.run(
+            question="Observa la imagen y elige.",
+            options=["A", "B"],
+            media_items=[
+                MediaItem(path="question.png", role="question", selector="#question-img"),
+                MediaItem(path="option_b.png", role="option", option_index=1, option_label="B", selector="#option-b-img"),
+            ],
+            is_dom_mode=True,
+        )
+
+        self.assertIn("[Enunciado]:", captured_context["context"])
+        self.assertIn("[Opción B]:", captured_context["context"])
+        self.assertNotIn('"descripcion_visual"', captured_context["context"])
+
     def test_ocr_mode_skips_qwen_without_visual_signal(self) -> None:
         pipeline = DecisionPipeline(BotConfig(vision_enabled=True))
 
-        def fail_analyze_image(path: str, question: str, options: list[str], *args, **kwargs) -> dict:
+        def fail_analyze_image(item: MediaItem, question: str, options: list[str], *args, **kwargs) -> dict:
             raise AssertionError("Qwen should not be called")
 
         pipeline.vision_analyzer.analyze_image = fail_analyze_image
@@ -123,7 +156,7 @@ class PipelineTests(unittest.TestCase):
         answer, qwen_activated, descriptions = pipeline.run(
             question="Capital de Francia?",
             options=["Madrid", "Paris"],
-            media_paths=[],
+            media_items=[],
             is_dom_mode=False,
         )
 
@@ -143,7 +176,7 @@ class PipelineTests(unittest.TestCase):
         _answer, qwen_activated, descriptions = pipeline.run(
             question="Segun la grafica, cual opcion es correcta?",
             options=["A", "B"],
-            media_paths=["capture.png"],
+            media_items=[MediaItem(path="capture.png", role="question", selector="screen_capture")],
             is_dom_mode=False,
         )
 
@@ -159,11 +192,11 @@ class PipelineTests(unittest.TestCase):
         pipeline.vision_analyzer.analyze_image = fail_analyze_image
         pipeline.ai_client.choose_answer = lambda parsed, context="", *args, **kwargs: AIAnswer("Yes", 0.95, "DOM is sufficient", "{}", 8)
         
-        # media_paths is empty and is_dom_mode=True, meaning DOM is sufficient.
+        # media_items is empty and is_dom_mode=True, meaning DOM is sufficient.
         answer, qwen_activated, descriptions = pipeline.run(
             question="Is this a simple text question?",
             options=["Yes", "No"],
-            media_paths=[],
+            media_items=[],
             is_dom_mode=True,
         )
         self.assertEqual(answer.answer, "Yes")

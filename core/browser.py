@@ -113,11 +113,12 @@ class BotBrowser:
             questionText = questionText.trim();
             
             // Clean up question text (remove image alt text or extra whitespace)
-            questionText = questionText.replace(/\s+/g, ' ');
+            questionText = questionText.replace(/\\s+/g, ' ');
             
             const options = [];
             const optionsHtml = [];
             const selectors = [];
+            const optionSelectors = [];
             
             // Find all input radio/checkbox elements in the target container
             const optionInputs = Array.from(targetContainer.querySelectorAll('input[type="radio"], input[type="checkbox"]'));
@@ -148,15 +149,25 @@ class BotBrowser:
                 }
                 return path.join(' > ');
             };
+
+            const questionSelector = (() => {
+                if (isFallback) {
+                    return getUniqueSelector(document.querySelector('.question, .pregunta') || document.body);
+                }
+                const qEl = targetContainer.querySelector('.question, .pregunta, p, h2, h3, h4');
+                return getUniqueSelector(qEl || targetContainer);
+            })();
             
             for (const input of optionInputs) {
                 let labelText = "";
                 let labelHtml = "";
+                let optionElement = null;
                 let parent = input.parentElement;
                 while (parent && parent !== targetContainer) {
                     if (parent.tagName === 'LABEL') {
                         labelText = parent.innerText;
                         labelHtml = parent.outerHTML;
+                        optionElement = parent;
                         break;
                     }
                     parent = parent.parentElement;
@@ -167,18 +178,21 @@ class BotBrowser:
                     if (label) {
                         labelText = label.innerText;
                         labelHtml = label.outerHTML;
+                        optionElement = label;
                     }
                 }
                 
                 if (!labelText) {
                     labelText = input.parentElement ? input.parentElement.innerText : "";
                     labelHtml = input.parentElement ? input.parentElement.outerHTML : "";
+                    optionElement = input.parentElement || input;
                 }
                 
                 labelText = labelText.trim();
                 options.push(labelText);
                 optionsHtml.push(labelHtml);
                 selectors.push(getUniqueSelector(input));
+                optionSelectors.push(getUniqueSelector(optionElement || input));
             }
             
             const mediaSelectors = [];
@@ -201,9 +215,11 @@ class BotBrowser:
             return {
                 question: questionText,
                 question_html: questionHtml,
+                question_selector: questionSelector,
                 options: options,
                 options_html: optionsHtml,
                 selectors: selectors,
+                option_selectors: optionSelectors,
                 media_selectors: mediaSelectors,
                 media_elements: mediaElementsData
             };

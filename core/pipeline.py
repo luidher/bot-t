@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any, Optional
 
 from core.ai import OllamaClient, AIAnswer
+from core.media_extractor import MediaItem
 from core.vision import VisionAnalyzer
 from core.config import BotConfig
 from core.parser import ParsedQuestion
@@ -26,7 +25,7 @@ class DecisionPipeline:
         self,
         question: str,
         options: list[str],
-        media_paths: list[str],
+        media_items: list[MediaItem],
         is_dom_mode: bool,
         ocr_texts: Optional[list[str]] = None,
         ocr_context: str = "",
@@ -37,7 +36,7 @@ class DecisionPipeline:
             (answer_object, qwen_activated, visual_descriptions)
         """
         # Fase 2: Detección de contenido visual
-        has_visual = self.detect_visual_content(question, options, media_paths, is_dom_mode)
+        has_visual = self.detect_visual_content(question, options, media_items, is_dom_mode)
         
         visual_json_list = None
         visual_context_str = ""
@@ -46,15 +45,22 @@ class DecisionPipeline:
         if has_visual and self.config.vision_enabled:
             print("[PIPELINE] Contenido visual detectado. Activando Qwen2.5-VL...")
             descriptions = []
-            for idx, path in enumerate(media_paths):
+            for idx, item in enumerate(media_items):
                 elem_ocr = ocr_texts[idx] if (ocr_texts and idx < len(ocr_texts)) else None
-                desc = self.vision_analyzer.analyze_image(path, question, options, ocr_text=elem_ocr)
+                desc = self.vision_analyzer.analyze_image(item, question, options, ocr_text=elem_ocr)
                 if desc:
+                    desc = {
+                        "role": item.role,
+                        "option_index": item.option_index,
+                        "option_label": item.option_label,
+                        "selector": item.selector,
+                        "path": item.path,
+                        **desc,
+                    }
                     descriptions.append(desc)
             if descriptions:
                 visual_json_list = descriptions
-                # Serializar a JSON para pasar como contexto a DeepSeek
-                visual_context_str = json.dumps(descriptions, indent=2, ensure_ascii=False)
+                visual_context_str = build_visual_context(descriptions)
                 qwen_activated = True
         else:
             print("[PIPELINE] Omitiendo Qwen2.5-VL (sin contenido visual o visión desactivada).")
@@ -69,12 +75,12 @@ class DecisionPipeline:
         self,
         question: str,
         options: list[str],
-        media_paths: list[str],
+        media_items: list[MediaItem],
         is_dom_mode: bool,
     ) -> bool:
         if is_dom_mode:
             # En modo DOM, si encontramos elementos multimedia en la pregunta, hay contenido visual.
-            return len(media_paths) > 0
+            return len(media_items) > 0
 
         # En modo OCR (o cuando solo tenemos la captura total):
         # 1. Búsqueda de palabras clave
@@ -89,12 +95,10 @@ class DecisionPipeline:
                 return True
 
         # 2. Análisis de contornos con OpenCV
-        if media_paths:
+        if media_items:
             try:
                 import cv2
-                import numpy as np
-
-                image_path = media_paths[0]
+                image_path = media_items[0].path
                 img = cv2.imread(str(image_path))
                 if img is not None:
                     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -117,3 +121,43 @@ class DecisionPipeline:
                 print(f"[PIPELINE WARNING] Error en la detección visual basada en OpenCV: {e}")
 
         return False
+
+
+def build_visual_context(descriptions: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for desc in descriptions:
+        role = desc.get("role")
+        if role == "option":
+            label = desc.get("option_label") or "?"
+            heading = f"Opción {label}"
+        else:
+            heading = "Enunciado"
+
+        text = _description_text(desc)
+        lines.append(f"[{heading}]: {text}")
+
+    return "\n".join(lines)
+
+
+def _description_text(desc: dict[str, Any]) -> str:
+    parts = []
+    content_type = str(desc.get("tipo_contenido", "")).strip()
+    visual_desc = str(desc.get("descripcion_visual", "")).strip()
+    extracted_data = desc.get("datos_extraidos")
+
+    if content_type:
+        parts.append(f"Tipo: {content_type}.")
+    if visual_desc:
+        parts.append(visual_desc)
+    if extracted_data:
+        parts.append(f"Datos extraídos: {_plain_text_value(extracted_data)}.")
+
+    return " ".join(parts).strip() or "Sin descripción visual disponible."
+
+
+def _plain_text_value(value: Any) -> str:
+    if isinstance(value, dict):
+        return "; ".join(f"{key}: {_plain_text_value(item)}" for key, item in value.items())
+    if isinstance(value, list):
+        return ", ".join(_plain_text_value(item) for item in value)
+    return str(value)

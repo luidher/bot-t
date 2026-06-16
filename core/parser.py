@@ -12,7 +12,9 @@ class ParsedQuestion:
     question: str
     options: list[str]
     raw_lines: list[str]
+    question_selector: str = ""
     selectors: list[str] = field(default_factory=list)
+    option_selectors: list[str] = field(default_factory=list)
     media_selectors: list[str] = field(default_factory=list)
     media_elements: list[dict] = field(default_factory=list)
 
@@ -24,7 +26,15 @@ class ParsedQuestion:
     def from_dom(cls, data: dict) -> "ParsedQuestion":
         """Construye un ParsedQuestion desde los datos extraídos del DOM.
 
-        data = {"question": str, "options": list[str], "selectors": list[str], "media_selectors": list[str], "media_elements": list[dict]}
+        data = {
+            "question": str,
+            "options": list[str],
+            "question_selector": str,
+            "selectors": list[str],
+            "option_selectors": list[str],
+            "media_selectors": list[str],
+            "media_elements": list[dict],
+        }
         """
         from core.mathjax_parser import MathJaxParser
         from bs4 import BeautifulSoup
@@ -52,6 +62,8 @@ class ParsedQuestion:
             options = [str(o).strip() for o in data.get("options", []) if str(o).strip()]
 
         selectors = [str(s).strip() for s in data.get("selectors", []) if str(s).strip()]
+        question_selector = str(data.get("question_selector", "")).strip()
+        option_selectors = [str(s).strip() for s in data.get("option_selectors", []) if str(s).strip()]
         media_selectors = [str(m).strip() for m in data.get("media_selectors", []) if str(m).strip()]
         media_elements = data.get("media_elements", [])
         raw_lines = [question] + options
@@ -59,7 +71,9 @@ class ParsedQuestion:
             question=question,
             options=options,
             raw_lines=raw_lines,
+            question_selector=question_selector,
             selectors=selectors,
+            option_selectors=option_selectors,
             media_selectors=media_selectors,
             media_elements=media_elements,
         )
