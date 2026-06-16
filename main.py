@@ -139,6 +139,7 @@ def run_once(
         region_offset=offset,
         min_score=args.min_click_score,
         dry_run=not args.i_am_authorized,
+        answer_index=answer.index,
     )
 
     print("\n=== PLAN DE INTERACCION ===")

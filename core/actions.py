@@ -24,6 +24,7 @@ def plan_click_for_answer(
     region_offset: tuple[int, int] = (0, 0),
     min_score: float = 0.58,
     dry_run: bool = True,
+    answer_index: int | None = None,
 ) -> ClickPlan | None:
     if not answer.strip() or not boxes:
         return None

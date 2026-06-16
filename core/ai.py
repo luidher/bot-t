@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import re
 import time
 from typing import Any, Optional
 
@@ -15,6 +16,8 @@ class AIAnswer:
     reasoning: str
     raw_response: str
     think_time_ms: int = 0
+    index: Optional[int] = None
+    raw: Optional[str] = None
 
     @property
     def reason(self) -> str:
@@ -71,7 +74,7 @@ class OllamaClient:
         
         raw = response.json().get("response", "").strip()
         
-        return parse_ai_answer(raw, elapsed_ms=elapsed_ms)
+        return parse_ai_answer(raw, elapsed_ms=elapsed_ms, options=parsed.options)
 
     def is_available(self) -> bool:
         import requests
@@ -121,7 +124,55 @@ Reglas:
 """.strip()
 
 
-def parse_ai_answer(raw: str, elapsed_ms: int = 0) -> AIAnswer:
+def _extraer_letra(respuesta_raw: str, num_opciones: int) -> int | None:
+    if not respuesta_raw or num_opciones <= 0:
+        return None
+
+    raw_cleaned = respuesta_raw.strip()
+    if not raw_cleaned:
+        return None
+
+    valid_letters = [chr(ord('A') + i) for i in range(num_opciones)]
+
+    # 1. Direct check of the fully stripped/normalized string
+    # Strips common markdown and punctuation around the letters
+    cleaned_exact = raw_cleaned.strip("*_()[].,-:\t ").upper()
+    if cleaned_exact in valid_letters:
+        return valid_letters.index(cleaned_exact)
+
+    # 2. Check if it's a number corresponding to an option index (1-based)
+    if cleaned_exact.isdigit():
+        idx = int(cleaned_exact) - 1
+        if 0 <= idx < num_opciones:
+            return idx
+
+    # 3. Check for patterns like "opción A", "option B", "opcion 3"
+    match_opt = re.match(r'^(?:opci[oó]n|option)\s+([a-zA-Z0-9]+)\b', raw_cleaned, re.IGNORECASE)
+    if match_opt:
+        val = match_opt.group(1).upper()
+        if val in valid_letters:
+            return valid_letters.index(val)
+        if val.isdigit():
+            idx = int(val) - 1
+            if 0 <= idx < num_opciones:
+                return idx
+
+    # 4. Check if it starts with a letter or digit followed by standard option delimiters
+    # E.g. "A) Una tercera parte", "1. Un medio"
+    match_start = re.match(r'^([a-zA-Z0-9]+)\s*[\)\.\-\:]\s*', raw_cleaned)
+    if match_start:
+        val = match_start.group(1).upper()
+        if val in valid_letters:
+            return valid_letters.index(val)
+        if val.isdigit():
+            idx = int(val) - 1
+            if 0 <= idx < num_opciones:
+                return idx
+
+    return None
+
+
+def parse_ai_answer(raw: str, elapsed_ms: int = 0, options: list[str] | None = None) -> AIAnswer:
     # 1. Clean think tag if it is outside of the JSON
     cleaned_raw = raw
     think_content = ""
@@ -135,7 +186,7 @@ def parse_ai_answer(raw: str, elapsed_ms: int = 0) -> AIAnswer:
     data = _loads_json(cleaned_raw)
     
     # Extract answer and reasoning
-    answer = str(data.get("answer", "")).strip()
+    respuesta_raw = str(data.get("answer", "")).strip()
     reasoning = str(data.get("reasoning", data.get("reason", ""))).strip()
     
     # If reasoning is empty but we extracted think content, use it!
@@ -152,12 +203,30 @@ def parse_ai_answer(raw: str, elapsed_ms: int = 0) -> AIAnswer:
     confidence = _as_float(data.get("confidence"), default=0.0)
     confidence = max(0.0, min(1.0, confidence))
 
+    index = None
+    answer = respuesta_raw
+
+    if options:
+        idx = _extraer_letra(respuesta_raw, len(options))
+        if idx is not None:
+            answer = options[idx]
+            index = idx
+        else:
+            # Fallback exact/case-insensitive match with the option list
+            for i, opt in enumerate(options):
+                if opt.strip().lower() == respuesta_raw.lower():
+                    answer = opt
+                    index = i
+                    break
+
     return AIAnswer(
         answer=answer,
         confidence=confidence,
         reasoning=reasoning,
         raw_response=raw,
         think_time_ms=elapsed_ms,
+        index=index,
+        raw=respuesta_raw,
     )
 
 

@@ -553,6 +553,7 @@ class BotRunner:
                 region_offset=offset,
                 min_score=self.config["min_click_score"],
                 dry_run=dry_run,
+                answer_index=answer.index,
             )
 
             if plan:

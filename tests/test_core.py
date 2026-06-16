@@ -31,6 +31,90 @@ class AITests(unittest.TestCase):
         self.assertEqual(answer.answer, "Paris")
         self.assertEqual(answer.confidence, 0.91)
         self.assertEqual(answer.reason, "capital correcta")
+        self.assertIsNone(answer.index)
+        self.assertEqual(answer.raw, "Paris")
+
+    def test_parse_json_answer_with_options_letter(self) -> None:
+        options = ["Madrid", "Paris", "Roma"]
+        # Model returns the option letter "B"
+        answer = parse_ai_answer(
+            '{"answer":"B","confidence":0.95,"reason":"eleccion por letra"}',
+            options=options
+        )
+        self.assertEqual(answer.answer, "Paris")
+        self.assertEqual(answer.index, 1)
+        self.assertEqual(answer.raw, "B")
+
+        # Model returns the option letter formatted "B)"
+        answer = parse_ai_answer(
+            '{"answer":"B)","confidence":0.95,"reason":"eleccion por letra con parentesis"}',
+            options=options
+        )
+        self.assertEqual(answer.answer, "Paris")
+        self.assertEqual(answer.index, 1)
+        self.assertEqual(answer.raw, "B)")
+
+    def test_parse_json_answer_with_options_number(self) -> None:
+        options = ["Madrid", "Paris", "Roma"]
+        # Model returns option number "2"
+        answer = parse_ai_answer(
+            '{"answer":"2","confidence":0.95,"reason":"eleccion por numero"}',
+            options=options
+        )
+        self.assertEqual(answer.answer, "Paris")
+        self.assertEqual(answer.index, 1)
+        self.assertEqual(answer.raw, "2")
+
+    def test_parse_json_answer_with_options_text_match(self) -> None:
+        options = ["Madrid", "Paris", "Roma"]
+        # Model returns exact text but different casing
+        answer = parse_ai_answer(
+            '{"answer":"paris","confidence":0.95,"reason":"eleccion por texto case-insensitive"}',
+            options=options
+        )
+        self.assertEqual(answer.answer, "Paris")
+        self.assertEqual(answer.index, 1)
+        self.assertEqual(answer.raw, "paris")
+
+    def test_parse_json_answer_fallback(self) -> None:
+        options = ["Madrid", "Paris", "Roma"]
+        # Model returns something unrelated
+        answer = parse_ai_answer(
+            '{"answer":"Londres","confidence":0.95,"reason":"no en opciones"}',
+            options=options
+        )
+        self.assertEqual(answer.answer, "Londres")
+        self.assertIsNone(answer.index)
+        self.assertEqual(answer.raw, "Londres")
+
+    def test_extraer_letra_direct(self) -> None:
+        from core.ai import _extraer_letra
+        
+        # Letter formats
+        self.assertEqual(_extraer_letra("A", 4), 0)
+        self.assertEqual(_extraer_letra("  B  ", 4), 1)
+        self.assertEqual(_extraer_letra("**C**", 4), 2)
+        self.assertEqual(_extraer_letra("D)", 4), 3)
+        self.assertEqual(_extraer_letra("A.", 4), 0)
+        self.assertEqual(_extraer_letra("(B)", 4), 1)
+        self.assertEqual(_extraer_letra("[C]", 4), 2)
+        self.assertEqual(_extraer_letra("opción A", 4), 0)
+        self.assertEqual(_extraer_letra("option B", 4), 1)
+        
+        # Option text prefix
+        self.assertEqual(_extraer_letra("A) Una tercera parte", 4), 0)
+        self.assertEqual(_extraer_letra("3. Una tercera parte", 4), 2)
+        
+        # Digit formats
+        self.assertEqual(_extraer_letra("1", 4), 0)
+        self.assertEqual(_extraer_letra("4", 4), 3)
+        
+        # Out of range / non-matching
+        self.assertIsNone(_extraer_letra("E", 4))
+        self.assertIsNone(_extraer_letra("5", 4))
+        self.assertIsNone(_extraer_letra("Una tercera parte", 4))
+        self.assertIsNone(_extraer_letra("", 4))
+        self.assertIsNone(_extraer_letra(None, 4))
 
 
 class ActionTests(unittest.TestCase):
@@ -208,10 +292,8 @@ class ConsoleTests(unittest.TestCase):
     def test_parse_args_derives_vision_enabled(self) -> None:
         try:
             import main as cli_main
-        except ModuleNotFoundError as exc:
-            if exc.name == "pyautogui":
-                self.skipTest("pyautogui is not installed")
-            raise
+        except (ModuleNotFoundError, SystemExit):
+            self.skipTest("pyautogui/GUI environment is not available")
 
         with patch("sys.argv", ["main.py", "--no-vision"]):
             args = cli_main.parse_args()
@@ -223,10 +305,8 @@ class RunnerTests(unittest.TestCase):
     def test_update_config_persists_and_emits_event(self) -> None:
         try:
             from core.runner import BotRunner
-        except ModuleNotFoundError as exc:
-            if exc.name == "playwright":
-                self.skipTest("playwright is not installed")
-            raise
+        except (ModuleNotFoundError, SystemExit):
+            self.skipTest("playwright/pyautogui/GUI environment is not available")
 
         events = []
 
