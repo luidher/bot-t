@@ -25,6 +25,7 @@ from PyQt5.QtGui import QColor, QCursor, QPainter, QPen, QBrush, QFont
 
 from core.config import BotConfig, BotConfigUpdate
 from core.runner import BotRunner, BotRunnerThread
+from core.autopilot_runner import AutopilotRunnerThread
 
 
 class RegionSelector(QWidget):
@@ -110,6 +111,7 @@ class VisionBotWidget(QWidget):
         self.drag_position = QPoint()
         self.runner = BotRunner()
         self.runner_thread: Optional[BotRunnerThread] = None
+        self.autopilot_thread: Optional[AutopilotRunnerThread] = None
 
         self.init_ui()
         self.load_config_to_ui()
@@ -118,7 +120,7 @@ class VisionBotWidget(QWidget):
     def init_ui(self) -> None:
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.resize(420, 560)
+        self.resize(420, 680)
 
         # Style sheet (Obsidian glassmorphism, nice buttons)
         self.setStyleSheet("""
@@ -217,6 +219,19 @@ class VisionBotWidget(QWidget):
                 background-color: #202028;
                 max-height: 1px;
             }
+            QFrame#DBStatsFrame {
+                background-color: #10101A;
+                border: 1px solid #1E2A1E;
+                border-radius: 8px;
+            }
+            QPushButton#BtnAutopilot {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #4776E6, stop:1 #8E54E9);
+                color: #FFFFFF;
+                border: 0px;
+            }
+            QPushButton#BtnAutopilot:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #5585f5, stop:1 #9e65f7);
+            }
         """)
 
         # Main Layout
@@ -264,7 +279,7 @@ class VisionBotWidget(QWidget):
         mode_layout = QHBoxLayout()
         mode_lbl = QLabel("Modo de trabajo:", self)
         self.cb_mode = QComboBox(self)
-        self.cb_mode.addItems(["Modo Automático", "Modo Visión", "Modo Playwright"])
+        self.cb_mode.addItems(["Modo Automático", "Modo Visión", "Modo Playwright", "Modo Autopilot DB"])
         self.cb_mode.currentTextChanged.connect(self.on_mode_changed)
         mode_layout.addWidget(mode_lbl)
         mode_layout.addWidget(self.cb_mode)
@@ -315,6 +330,36 @@ class VisionBotWidget(QWidget):
         actions_layout.addWidget(self.btn_stop)
         layout.addLayout(actions_layout)
 
+        # ── DB Stats Panel (visible sólo en Modo Autopilot DB) ──────────
+        self.db_stats_frame = QFrame(self)
+        self.db_stats_frame.setObjectName("DBStatsFrame")
+        db_stats_layout = QVBoxLayout(self.db_stats_frame)
+        db_stats_layout.setContentsMargins(10, 8, 10, 8)
+        db_stats_layout.setSpacing(4)
+
+        db_title = QLabel("📦  Base de Datos Autopilot", self)
+        db_title.setStyleSheet("color: #8E54E9; font-weight: bold; font-size: 11px;")
+
+        self.lbl_db_total      = QLabel("Total en BD: 0", self)
+        self.lbl_db_hits       = QLabel("Desde BD: 0", self)
+        self.lbl_db_azar       = QLabel("Al azar: 0", self)
+        self.lbl_db_guardadas  = QLabel("Nuevas guardadas: 0", self)
+        self.lbl_db_hojas      = QLabel("Hojas completadas: 0", self)
+
+        for lbl in (self.lbl_db_total, self.lbl_db_hits,
+                    self.lbl_db_azar, self.lbl_db_guardadas, self.lbl_db_hojas):
+            lbl.setStyleSheet("color: #9A9AB0; font-size: 10px;")
+
+        db_stats_layout.addWidget(db_title)
+        db_stats_layout.addWidget(self.lbl_db_total)
+        db_stats_layout.addWidget(self.lbl_db_hits)
+        db_stats_layout.addWidget(self.lbl_db_azar)
+        db_stats_layout.addWidget(self.lbl_db_guardadas)
+        db_stats_layout.addWidget(self.lbl_db_hojas)
+
+        layout.addWidget(self.db_stats_frame)
+        self.db_stats_frame.hide()   # oculto hasta que se seleccione el modo
+
         # Real-time Log Panel
         log_lbl = QLabel("Registros de Eventos:", self)
         self.log_panel = QTextEdit(self)
@@ -362,8 +407,14 @@ class VisionBotWidget(QWidget):
         self.lbl_tess_status.setStyleSheet("color: #FF416C; font-weight: bold;")
         self.lbl_tess_status.setToolTip("Verifica si Tesseract-OCR está instalado en la ruta.")
 
+        self.lbl_db_status = QLabel("DB: ●", self)
+        self.lbl_db_status.setStyleSheet("color: #7A7A8A; font-weight: bold;")
+        self.lbl_db_status.setToolTip("Base de datos Autopilot (autopilot_respuestas.db).")
+        self.lbl_db_status.hide()   # sólo visible en Modo Autopilot DB
+
         bottom_layout.addWidget(self.lbl_status)
         bottom_layout.addStretch()
+        bottom_layout.addWidget(self.lbl_db_status)
         bottom_layout.addWidget(self.lbl_ollama_status)
         bottom_layout.addWidget(self.lbl_tess_status)
         layout.addLayout(bottom_layout)
@@ -380,14 +431,27 @@ class VisionBotWidget(QWidget):
             self.cb_mode.setCurrentIndex(0)
             self.url_widget.show()
             self.region_widget.show()
+            self.db_stats_frame.hide()
+            self.lbl_db_status.hide()
         elif config.mode == "playwright":
             self.cb_mode.setCurrentIndex(2)
             self.url_widget.show()
             self.region_widget.hide()
-        else: # vision
+            self.db_stats_frame.hide()
+            self.lbl_db_status.hide()
+        elif config.mode == "autopilot_db":
+            self.cb_mode.setCurrentIndex(3)
+            self.url_widget.show()
+            self.region_widget.hide()
+            self.db_stats_frame.show()
+            self.lbl_db_status.show()
+            self._refresh_db_indicator()
+        else:  # vision
             self.cb_mode.setCurrentIndex(1)
             self.url_widget.hide()
             self.region_widget.show()
+            self.db_stats_frame.hide()
+            self.lbl_db_status.hide()
 
         self.txt_url.setText(config.url)
         
@@ -413,16 +477,19 @@ class VisionBotWidget(QWidget):
             config.mode = "auto"
         elif idx == 2:
             config.mode = "playwright"
+        elif idx == 3:
+            config.mode = "autopilot_db"
         else:
             config.mode = "vision"
         config.url = self.txt_url.text().strip()
         config.save()
         
-        # Apply configuration back to runner
-        self.runner.update_config(BotConfigUpdate(
-            mode=config.mode,
-            url=config.url
-        ))
+        # Apply configuration back to runner (only for non-autopilot modes)
+        if config.mode != "autopilot_db":
+            self.runner.update_config(BotConfigUpdate(
+                mode=config.mode,
+                url=config.url
+            ))
         return config
 
     def check_system_status(self) -> None:
@@ -495,12 +562,24 @@ class VisionBotWidget(QWidget):
         if mode_text == "Modo Automático":
             self.url_widget.show()
             self.region_widget.show()
+            self.db_stats_frame.hide()
+            self.lbl_db_status.hide()
         elif mode_text == "Modo Playwright":
             self.url_widget.show()
             self.region_widget.hide()
-        else: # Modo Visión
+            self.db_stats_frame.hide()
+            self.lbl_db_status.hide()
+        elif mode_text == "Modo Autopilot DB":
+            self.url_widget.show()
+            self.region_widget.hide()
+            self.db_stats_frame.show()
+            self.lbl_db_status.show()
+            self._refresh_db_indicator()
+        else:  # Modo Visión
             self.url_widget.hide()
             self.region_widget.show()
+            self.db_stats_frame.hide()
+            self.lbl_db_status.hide()
         self.save_ui_to_config()
 
     def start_region_selector(self) -> None:
@@ -537,6 +616,30 @@ class VisionBotWidget(QWidget):
         # Save settings first
         config = self.save_ui_to_config()
 
+        # ── Modo Autopilot DB ──────────────────────────────────────────
+        if config.mode == "autopilot_db":
+            url = config.url.strip()
+            if not url:
+                self.append_log("ERROR: Configura la URL antes de iniciar el Autopilot DB.", "ERROR")
+                return
+            self.btn_start.setEnabled(False)
+            self.btn_pause.setEnabled(True)
+            self.btn_stop.setEnabled(True)
+            self.cb_mode.setEnabled(False)
+            self.txt_url.setEnabled(False)
+            self.btn_select_region.setEnabled(False)
+
+            self.autopilot_thread = AutopilotRunnerThread(
+                url=url,
+                bot_config=self.runner.config,
+            )
+            self.autopilot_thread.log_signal.connect(self.on_runner_log)
+            self.autopilot_thread.status_signal.connect(self.on_runner_status)
+            self.autopilot_thread.db_stats_signal.connect(self.on_db_stats)
+            self.autopilot_thread.start()
+            return
+
+        # ── Modos Automático / Visión / Playwright ─────────────────────
         # Check dependencies before starting
         status = self.runner.get_system_status()
         if config.mode == "vision" and not status.get("tesseract_available"):
@@ -572,6 +675,17 @@ class VisionBotWidget(QWidget):
         self.runner_thread.start()
 
     def toggle_pause(self) -> None:
+        # Autopilot DB thread
+        if self.autopilot_thread and self.autopilot_thread.isRunning():
+            if self.btn_pause.text().startswith("⏸"):
+                self.autopilot_thread.pause()
+                self.btn_pause.setText("▶ Reanudar")
+            else:
+                self.autopilot_thread.resume()
+                self.btn_pause.setText("⏸ Pausar")
+            return
+
+        # Modos existentes
         if not self.runner.loop_active:
             return
         
@@ -583,6 +697,13 @@ class VisionBotWidget(QWidget):
             self.btn_pause.setText("▶ Reanudar")
 
     def stop_bot(self) -> None:
+        # Detener Autopilot DB si está activo
+        if self.autopilot_thread and self.autopilot_thread.isRunning():
+            self.autopilot_thread.stop()
+            self.autopilot_thread.wait(3000)
+            self.autopilot_thread = None
+
+        # Detener runner normal si está activo
         if self.runner_thread:
             self.runner.stop_loop()
             self.runner_thread.wait()
@@ -630,6 +751,60 @@ class VisionBotWidget(QWidget):
             threshold=float(result.get("confidence_threshold") or self.runner.config.get("confidence_threshold", 0.70)),
             reason=reason,
         )
+
+    # ------------------------------------------------------------------
+    # Autopilot DB slots
+    # ------------------------------------------------------------------
+
+    @pyqtSlot(dict)
+    def on_db_stats(self, stats: dict) -> None:
+        """Actualiza el panel de estadísticas de BD en tiempo real."""
+        total = stats.get("total_registros_db", 0)
+        hits  = stats.get("respondidas_desde_db", 0)
+        azar  = stats.get("respondidas_al_azar", 0)
+        saved = stats.get("nuevas_guardadas", 0)
+        hojas = stats.get("hojas_completadas", 0)
+
+        self.lbl_db_total.setText(f"Total en BD: {total:,}")
+        self.lbl_db_hits.setText(f"Desde BD: {hits}")
+        self.lbl_db_azar.setText(f"Al azar: {azar}")
+        self.lbl_db_guardadas.setText(f"Nuevas guardadas: {saved}")
+        self.lbl_db_hojas.setText(f"Hojas completadas: {hojas}")
+
+        # Colorear stats
+        self.lbl_db_hits.setStyleSheet("color: #00F260; font-size: 10px;" if hits > 0 else "color: #9A9AB0; font-size: 10px;")
+        self.lbl_db_azar.setStyleSheet("color: #f7971e; font-size: 10px;" if azar > 0 else "color: #9A9AB0; font-size: 10px;")
+        self.lbl_db_guardadas.setStyleSheet("color: #8E54E9; font-size: 10px;" if saved > 0 else "color: #9A9AB0; font-size: 10px;")
+
+        # Actualizar indicador de BD
+        if total > 0:
+            self.lbl_db_status.setStyleSheet("color: #00F260; font-weight: bold;")
+            self.lbl_db_status.setToolTip(f"BD Autopilot activa. {total:,} preguntas guardadas.")
+        else:
+            self.lbl_db_status.setStyleSheet("color: #f7971e; font-weight: bold;")
+            self.lbl_db_status.setToolTip("BD Autopilot vacía. Aprenderá en esta sesión.")
+
+    def _refresh_db_indicator(self) -> None:
+        """Consulta la BD para actualizar el indicador sin iniciar el bot."""
+        try:
+            from core.db_manager import DBManager
+            db = DBManager()
+            total = db.contar_registros()
+            db.close()
+            if total > 0:
+                self.lbl_db_status.setStyleSheet("color: #00F260; font-weight: bold;")
+                self.lbl_db_status.setToolTip(f"BD Autopilot activa. {total:,} preguntas guardadas.")
+                self.lbl_db_total.setText(f"Total en BD: {total:,}")
+            else:
+                self.lbl_db_status.setStyleSheet("color: #f7971e; font-weight: bold;")
+                self.lbl_db_status.setToolTip("BD Autopilot vacía. Aprenderá en esta sesión.")
+                self.lbl_db_total.setText("Total en BD: 0")
+        except Exception:
+            self.lbl_db_status.setStyleSheet("color: #7A7A8A; font-weight: bold;")
+
+    # ------------------------------------------------------------------
+    # Log
+    # ------------------------------------------------------------------
 
     def append_log(self, message: str, level: str = "INFO") -> None:
         color = "#D2D2DC"

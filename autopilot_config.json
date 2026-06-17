@@ -1,0 +1,53 @@
+{
+    "_comentario": "Configuración de selectores CSS para el Modo Autopilot DB. Edita este archivo para adaptar el bot a tu plataforma sin tocar código.",
+    "selectors": {
+        "question_container":  "ul.form-items > li, .form-items > li, li[data-type='OM']",
+        "question_text":       ".question, .pregunta, p, h2, h3, h4",
+        "option_input":        "input[type='radio'], input[type='checkbox']",
+        "option_label":        "label",
+        "correct_markers": [
+            ".correct",
+            ".respuesta-correcta",
+            ".is-correct",
+            "[class*='correct']",
+            "[class*='success']"
+        ],
+        "incorrect_markers": [
+            ".incorrect",
+            ".respuesta-incorrecta",
+            ".is-incorrect",
+            "[class*='incorrect']",
+            "[class*='wrong']",
+            "[class*='error']"
+        ],
+        "next_button": [
+            "button.next",
+            "a.next",
+            "input[type='submit'][value*='iguiente']",
+            "button[class*='next']",
+            "button[class*='siguiente']",
+            ".btn-next",
+            ".next-page"
+        ],
+        "retry_button": [
+            "button.retry",
+            "a.retry",
+            "button[class*='retry']",
+            "button[class*='reintentar']",
+            ".btn-retry",
+            ".reintentar",
+            "button[onclick*='reload']"
+        ]
+    },
+    "timings": {
+        "feedback_wait_ms":   900,
+        "after_click_wait_ms": 600,
+        "reload_wait_ms":     2000,
+        "next_wait_ms":       2500,
+        "dom_stable_wait_ms": 500
+    },
+    "limits": {
+        "max_sheets":          10000,
+        "max_intentos_por_pregunta": 8
+    }
+}
