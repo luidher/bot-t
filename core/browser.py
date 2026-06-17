@@ -14,7 +14,7 @@ class BotBrowser:
         self._context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
 
-    def open(self, url: str, timeout_ms: int = 10000) -> None:
+    def open(self, url: str, timeout_ms: int = 30000) -> None:
         """Launch browser and open the target URL."""
         if not self._playwright:
             self._playwright = sync_playwright().start()
@@ -28,9 +28,8 @@ class BotBrowser:
 
         assert self.page is not None
         self.page.set_default_timeout(timeout_ms)
-        self.page.goto(url)
-        # Wait a bit for page to stabilize
-        self.page.wait_for_load_state("load")
+        self.page.goto(url, timeout=timeout_ms, wait_until="load")
+        self.page.wait_for_load_state("load", timeout=timeout_ms)
         time.sleep(1.0)
 
     def read_page(self) -> Optional[Dict[str, Any]]:
@@ -243,16 +242,16 @@ class BotBrowser:
             raise RuntimeError("Browser not initialized.")
         self.page.fill(selector, text)
 
-    def next_page(self, selector: str) -> bool:
+    def next_page(self, selector: str, timeout_ms: int = 30000) -> bool:
         """Click the next/submit button and return True if successful."""
         if not self.page:
             return False
         try:
             # Scroll to make sure it's visible/clickable
             self.page.locator(selector).scroll_into_view_if_needed()
-            self.page.click(selector)
-            # Wait for either load state or brief timeout
-            self.page.wait_for_load_state("load", timeout=3000)
+            self.page.click(selector, timeout=timeout_ms)
+            # Wait for either load state or longer timeout
+            self.page.wait_for_load_state("load", timeout=timeout_ms)
             time.sleep(1.0)
             return True
         except Exception as e:

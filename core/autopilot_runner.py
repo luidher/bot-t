@@ -49,6 +49,9 @@ def _load_autopilot_config() -> dict[str, Any]:
             "next_wait_ms": 2500,
             "dom_stable_wait_ms": 500,
         },
+        "browser": {
+            "keep_open": False
+        },
         "limits": {
             "max_sheets": 10000,
             "max_intentos_por_pregunta": 8,
@@ -212,15 +215,24 @@ _JS_VALIDATE = r"""
 
 _JS_FIND_BUTTON = r"""
 (selectorList) => {
+    const isVisible = (el) => {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity) === 0) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    };
+
+    const previousTargets = document.querySelectorAll('[data-ap-temp-target="true"]');
+    previousTargets.forEach((node) => node.removeAttribute('data-ap-temp-target'));
+
     for (const sel of selectorList) {
         try {
-            const el = document.querySelector(sel);
-            if (el && el.offsetParent !== null) {
-                // Genera selector único para el elemento encontrado
-                if (el.id) return "#" + el.id;
-                const tag = el.tagName.toLowerCase();
-                const text = (el.innerText || el.value || "").trim().substring(0, 30);
-                return `${tag}:has-text("${text}")` || sel;
+            const elements = Array.from(document.querySelectorAll(sel));
+            for (const el of elements) {
+                if (!isVisible(el)) continue;
+                el.setAttribute('data-ap-temp-target', 'true');
+                return '[data-ap-temp-target="true"]';
             }
         } catch (_) {}
     }
@@ -250,11 +262,13 @@ class AutopilotRunner:
         bot_config: dict[str, Any],
         log_callback: Callable[[str, str], None] | None = None,
         stats_callback: Callable[[dict], None] | None = None,
+        keep_browser_open: bool = False,
     ) -> None:
         self.url = url
-        self.bot_config = bot_config
+        self.bot_config = bot_config.dict() if hasattr(bot_config, "dict") and callable(getattr(bot_config, "dict")) else bot_config
         self.log_cb = log_callback or (lambda msg, lvl: print(f"[{lvl}] {msg}"))
         self.stats_cb = stats_callback or (lambda _: None)
+        self.keep_browser_open = keep_browser_open
 
         self.ap_cfg = _load_autopilot_config()
         self.timings = self.ap_cfg["timings"]
@@ -281,6 +295,11 @@ class AutopilotRunner:
 
     def stop(self) -> None:
         self._running = False
+        if self.browser:
+            try:
+                self.browser.close()
+            except Exception:
+                pass
 
     def pause(self) -> None:
         self._paused = True
@@ -324,20 +343,13 @@ class AutopilotRunner:
         """Hace clic en el input de la opción dada por selector."""
         if not self.browser or not self.browser.page:
             return False
-        try:
-            target = click_selector or selector
-            self.browser.page.click(target, timeout=5000)
-            time.sleep(self.timings["after_click_wait_ms"] / 1000)
+        target = click_selector or selector
+        if self._click_selector_with_fallback(target):
             return True
-        except Exception as exc:
-            self._log(f"Error al hacer clic en '{selector}': {exc}", "WARNING")
-            # Intentar con el selector de input directamente
-            try:
-                self.browser.page.click(selector, timeout=3000)
-                time.sleep(self.timings["after_click_wait_ms"] / 1000)
-                return True
-            except Exception:
-                return False
+        if selector != target and self._click_selector_with_fallback(selector):
+            return True
+        self._log(f"Error al hacer clic en '{selector}' con todos los fallbacks.", "WARNING")
+        return False
 
     def validar_acierto(self, selector: str) -> str:
         """
@@ -354,6 +366,51 @@ class AutopilotRunner:
             self._log(f"Error al validar acierto: {exc}", "WARNING")
             return "unknown"
 
+    def _js_click_selector(self, selector: str) -> bool:
+        if not self.browser or not self.browser.page:
+            return False
+        try:
+            clicked = self.browser.page.evaluate(
+                """(sel) => {
+                    const normalized = sel.trim();
+                    const textMatch = normalized.match(/:has-text\(\s*["']([^"']+)["']\s*\)/);
+                    if (textMatch) {
+                        const expected = textMatch[1].trim();
+                        const candidates = Array.from(document.querySelectorAll('button, a, input, label, span, div'));
+                        for (const node of candidates) {
+                            const value = ((node.innerText || node.value || "") + "").trim();
+                            if (value.includes(expected)) {
+                                node.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                    const el = document.querySelector(sel);
+                    if (!el) return false;
+                    el.click();
+                    return true;
+                }""",
+                selector,
+            )
+            time.sleep(self.timings["after_click_wait_ms"] / 1000)
+            return bool(clicked)
+        except Exception as exc:
+            self._log(f"Error al hacer clic vía JS en '{selector}': {exc}", "DEBUG")
+            return False
+
+    def _click_selector_with_fallback(self, selector: str) -> bool:
+        if not selector or not self.browser or not self.browser.page:
+            return False
+        for click_kwargs in ({}, {"force": True}):
+            try:
+                self.browser.page.click(selector, timeout=5000, **click_kwargs)
+                time.sleep(self.timings["after_click_wait_ms"] / 1000)
+                return True
+            except Exception:
+                continue
+        return self._js_click_selector(selector)
+
     def recargar_hoja_actual(self) -> bool:
         """
         Recarga la hoja actual sin avanzar a la siguiente.
@@ -369,10 +426,10 @@ class AutopilotRunner:
             found_sel = self.browser.page.evaluate(_JS_FIND_BUTTON, retry_selectors)
             if found_sel:
                 self._log("Botón 'Reintentar' encontrado. Haciendo clic...", "INFO")
-                self.browser.page.click(found_sel, timeout=4000)
-                time.sleep(self.timings["reload_wait_ms"] / 1000)
-                self.browser.page.wait_for_load_state("load", timeout=8000)
-                return True
+                if self._click_selector_with_fallback(found_sel):
+                    self.browser.page.wait_for_load_state("load", timeout=8000)
+                    return True
+                self._log("Clic en el botón 'Reintentar' falló. Intentando recarga manual...", "WARNING")
         except Exception:
             pass
 
@@ -399,21 +456,27 @@ class AutopilotRunner:
             found_sel = self.browser.page.evaluate(_JS_FIND_BUTTON, next_selectors)
             if found_sel:
                 self._log(f"Botón 'Siguiente' encontrado ({found_sel}). Avanzando...", "INFO")
-                self.browser.page.click(found_sel, timeout=5000)
-                time.sleep(self.timings["next_wait_ms"] / 1000)
-                self.browser.page.wait_for_load_state("load", timeout=10000)
-                return True
+                if self._click_selector_with_fallback(found_sel):
+                    time.sleep(self.timings["next_wait_ms"] / 1000)
+                    self.browser.page.wait_for_load_state(
+                        "load",
+                        timeout=self.bot_config.get("pw_timeout_ms", 30000),
+                    )
+                    return True
+                self._log("Clic en el botón 'Siguiente' falló. Intentando otro selector...", "WARNING")
         except Exception:
             pass
 
         # Fallback: buscar con Playwright locator con texto
         for text_hint in ["Siguiente", "Next", "Continuar", "Submit", "Enviar"]:
             try:
-                loc = self.browser.page.locator(f"button:has-text('{text_hint}'), a:has-text('{text_hint}')")
-                if loc.count() > 0:
-                    loc.first.click(timeout=4000)
+                selector = f"button:has-text('{text_hint}'), a:has-text('{text_hint}')"
+                if self._click_selector_with_fallback(selector):
                     time.sleep(self.timings["next_wait_ms"] / 1000)
-                    self.browser.page.wait_for_load_state("load", timeout=10000)
+                    self.browser.page.wait_for_load_state(
+                        "load",
+                        timeout=self.bot_config.get("pw_timeout_ms", 30000),
+                    )
                     self._log(f"Avanzado con botón '{text_hint}'.", "SUCCESS")
                     return True
             except Exception:
@@ -674,12 +737,15 @@ class AutopilotRunner:
         self.db.close()
 
         if self.browser:
-            self._log("Cerrando navegador Playwright...", "INFO")
-            try:
-                self.browser.close()
-            except Exception:
-                pass
-            self.browser = None
+            if self.keep_browser_open or self.ap_cfg.get("browser", {}).get("keep_open", False):
+                self._log("Manteniendo navegador abierto según configuración de Autopilot.", "INFO")
+            else:
+                self._log("Cerrando navegador Playwright...", "INFO")
+                try:
+                    self.browser.close()
+                except Exception:
+                    pass
+                self.browser = None
 
 
 # ---------------------------------------------------------------------------
@@ -723,11 +789,13 @@ if _HAS_PYQT:
             self,
             url: str,
             bot_config: dict,
+            keep_browser_open: bool = False,
             parent: object = None,
         ) -> None:
             super().__init__(parent)
             self._url = url
             self._bot_config = bot_config
+            self._keep_browser_open = keep_browser_open
             self._runner: Optional[AutopilotRunner] = None
 
         def run(self) -> None:
@@ -737,6 +805,7 @@ if _HAS_PYQT:
                 bot_config=self._bot_config,
                 log_callback=lambda msg, lvl: self.log_signal.emit(msg, lvl),
                 stats_callback=lambda stats: self.db_stats_signal.emit(stats),
+                keep_browser_open=self._keep_browser_open,
             )
             try:
                 self._runner.run()

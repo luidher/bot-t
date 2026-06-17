@@ -53,7 +53,7 @@ class BotConfig(BaseModel):
     next_wait_sec: float = Field(default=2.0, ge=0.0, le=60.0)
 
     # Playwright settings
-    pw_timeout_ms: int = Field(default=10000, ge=0)
+    pw_timeout_ms: int = Field(default=30000, ge=0)
     pw_headless: bool = False           # False = browser visible
 
     # Tesseract path (vision mode)

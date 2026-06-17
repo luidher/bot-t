@@ -632,6 +632,7 @@ class VisionBotWidget(QWidget):
             self.autopilot_thread = AutopilotRunnerThread(
                 url=url,
                 bot_config=self.runner.config,
+                keep_browser_open=True,
             )
             self.autopilot_thread.log_signal.connect(self.on_runner_log)
             self.autopilot_thread.status_signal.connect(self.on_runner_status)
@@ -733,6 +734,13 @@ class VisionBotWidget(QWidget):
         else:
             self.lbl_status.setText("● Inactivo")
             self.lbl_status.setStyleSheet("color: #7A7A8A; font-weight: bold;")
+            self.btn_start.setEnabled(True)
+            self.btn_pause.setEnabled(False)
+            self.btn_pause.setText("⏸ Pausar")
+            self.btn_stop.setEnabled(False)
+            self.cb_mode.setEnabled(True)
+            self.txt_url.setEnabled(True)
+            self.btn_select_region.setEnabled(True)
 
     @pyqtSlot(dict)
     def on_runner_result(self, result: dict) -> None:
