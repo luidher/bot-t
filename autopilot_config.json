@@ -46,6 +46,11 @@
         "next_wait_ms":       2500,
         "dom_stable_wait_ms": 500
     },
+    "auth": {
+        "wait_for_manual_auth": true,
+        "manual_auth_timeout_sec": 300,
+        "manual_auth_poll_sec": 1.0
+    },
     "limits": {
         "max_sheets":          10000,
         "max_intentos_por_pregunta": 8

@@ -17,10 +17,12 @@ import random
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
-from core.browser import BotBrowser
 from core.db_manager import DBManager
+
+if TYPE_CHECKING:
+    from core.browser import BotBrowser
 
 AUTOPILOT_CONFIG_FILE = Path("autopilot_config.json")
 
@@ -48,6 +50,11 @@ def _load_autopilot_config() -> dict[str, Any]:
             "reload_wait_ms": 2000,
             "next_wait_ms": 2500,
             "dom_stable_wait_ms": 500,
+        },
+        "auth": {
+            "wait_for_manual_auth": True,
+            "manual_auth_timeout_sec": 300,
+            "manual_auth_poll_sec": 1.0,
         },
         "browser": {
             "keep_open": False
@@ -273,9 +280,11 @@ class AutopilotRunner:
         self.ap_cfg = _load_autopilot_config()
         self.timings = self.ap_cfg["timings"]
         self.limits = self.ap_cfg["limits"]
+        self.auth_cfg = self.ap_cfg["auth"]
 
         self.db = DBManager()
-        self.browser: Optional[BotBrowser] = None
+        self.browser: Optional["BotBrowser"] = None
+        self.failed_questions_in_sheet: set[str] = set()
 
         # Estadísticas de sesión
         self.stats = {
@@ -330,14 +339,101 @@ class AutopilotRunner:
         if not self.browser or not self.browser.page:
             return None
         try:
-            result = self.browser.page.evaluate(_JS_EXTRACT)
-            if not result:
+            result = self.browser.read_page(skip_questions=self.failed_questions_in_sheet)
+            question = self._normalize_page_question(result)
+            if not question:
                 return None
             # Devolvemos como lista de una pregunta (la primera sin responder)
-            return [result]
+            return [question]
         except Exception as exc:
             self._log(f"Error al extraer preguntas del DOM: {exc}", "ERROR")
             return None
+
+    def _normalize_page_question(self, page_data: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Convierte BotBrowser.read_page al formato usado internamente por Autopilot."""
+        if not page_data:
+            return None
+
+        question = str(page_data.get("question") or "").strip()
+        raw_options = list(page_data.get("options") or [])
+        selectors = list(page_data.get("selectors") or [])
+        click_selectors = list(page_data.get("option_selectors") or selectors)
+
+        options: list[dict[str, str | None]] = []
+        for idx, text in enumerate(raw_options):
+            option_text = str(text or "").strip()
+            selector = selectors[idx] if idx < len(selectors) else ""
+            click_selector = click_selectors[idx] if idx < len(click_selectors) else selector
+            if not option_text or not selector:
+                continue
+            options.append(
+                {
+                    "texto": option_text,
+                    "selector": selector,
+                    "clickSelector": click_selector or selector,
+                }
+            )
+
+        if not question:
+            return None
+
+        return {"question": question, "options": options}
+
+    def _wait_for_manual_auth_and_questions(self) -> bool:
+        """
+        Deja el navegador abierto para login manual y empieza cuando hay pregunta.
+        El chequeo usa el mismo extractor DOM del resto de modos.
+        """
+        if not self.auth_cfg.get("wait_for_manual_auth", True):
+            return True
+        if not self.browser or not self.browser.page:
+            return False
+
+        timeout_sec = float(self.auth_cfg.get("manual_auth_timeout_sec", 300))
+        poll_sec = max(float(self.auth_cfg.get("manual_auth_poll_sec", 1.0)), 0.2)
+        started_at = time.monotonic()
+        notified_wait = False
+
+        self._log(
+            "Navegador abierto. Autentícate manualmente y navega hasta la hoja de preguntas; "
+            "el Autopilot iniciará cuando detecte una pregunta con opciones.",
+            "INFO",
+        )
+
+        while self._running:
+            self._check_pause()
+            page_data = self.browser.read_page()
+            question = self._normalize_page_question(page_data)
+            if question and question.get("options"):
+                self._log("Pregunta detectada después de la autenticación. Iniciando flujo Autopilot DB.", "SUCCESS")
+                return True
+            if self._page_has_next_button():
+                self._log("Navegación de hoja detectada después de la autenticación. Iniciando flujo Autopilot DB.", "SUCCESS")
+                return True
+
+            if not notified_wait:
+                self._log("Esperando autenticación manual o aparición de preguntas...", "INFO")
+                notified_wait = True
+
+            if timeout_sec > 0 and time.monotonic() - started_at >= timeout_sec:
+                self._log(
+                    f"No se detectaron preguntas después de {timeout_sec:.0f}s de espera manual.",
+                    "ERROR",
+                )
+                return False
+
+            time.sleep(poll_sec)
+
+        return False
+
+    def _page_has_next_button(self) -> bool:
+        if not self.browser or not self.browser.page:
+            return False
+        try:
+            next_selectors = self.ap_cfg["selectors"]["next_button"]
+            return bool(self.browser.page.evaluate(_JS_FIND_BUTTON, next_selectors))
+        except Exception:
+            return False
 
     def hacer_clic_en_opcion(self, selector: str, click_selector: str | None = None) -> bool:
         """Hace clic en el input de la opción dada por selector."""
@@ -371,7 +467,7 @@ class AutopilotRunner:
             return False
         try:
             clicked = self.browser.page.evaluate(
-                """(sel) => {
+                r"""(sel) => {
                     const normalized = sel.trim();
                     const textMatch = normalized.match(/:has-text\(\s*["']([^"']+)["']\s*\)/);
                     if (textMatch) {
@@ -508,14 +604,23 @@ class AutopilotRunner:
         self._log(f"Registros en BD al inicio: {self.db.contar_registros()}", "INFO")
 
         # Abrir navegador
-        self.browser = BotBrowser(headless=self.bot_config.get("pw_headless", False))
-        try:
-            self.browser.open(
-                self.url,
-                timeout_ms=self.bot_config.get("pw_timeout_ms", 10000),
-            )
-        except Exception as exc:
-            self._log(f"Error al abrir el navegador: {exc}", "ERROR")
+        opened_browser = False
+        if not self.browser:
+            from core.browser import BotBrowser
+
+            self.browser = BotBrowser(headless=self.bot_config.get("pw_headless", False))
+            try:
+                self.browser.open(
+                    self.url,
+                    timeout_ms=self.bot_config.get("pw_timeout_ms", 10000),
+                )
+                opened_browser = True
+            except Exception as exc:
+                self._log(f"Error al abrir el navegador: {exc}", "ERROR")
+                self._shutdown()
+                return
+
+        if opened_browser and not self._wait_for_manual_auth_and_questions():
             self._shutdown()
             return
 
@@ -528,6 +633,7 @@ class AutopilotRunner:
             if not self._running:
                 break
 
+            self.failed_questions_in_sheet.clear()
             hojas_procesadas += 1
             self._log(f"── Procesando hoja {hojas_procesadas} ──", "INFO")
 
@@ -563,6 +669,7 @@ class AutopilotRunner:
                         f"Pregunta #{pregunta_actual_idx + 1} sin opciones detectadas. Saltando...",
                         "WARNING",
                     )
+                    self.failed_questions_in_sheet.add(texto_pregunta)
                     pregunta_actual_idx += 1
                     continue
 
@@ -701,6 +808,7 @@ class AutopilotRunner:
                         "Posible cambio en la interfaz. Continuando...",
                         "ERROR",
                     )
+                    self.failed_questions_in_sheet.add(texto_pregunta)
                     pregunta_actual_idx += 1  # forzar avance para no bloquearse
 
             # ── Paso C: Avanzar hoja ────────────────────────────────────

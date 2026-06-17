@@ -32,7 +32,7 @@ class BotBrowser:
         self.page.wait_for_load_state("load", timeout=timeout_ms)
         time.sleep(1.0)
 
-    def read_page(self) -> Optional[Dict[str, Any]]:
+    def read_page(self, skip_questions: Optional[set[str] | list[str]] = None) -> Optional[Dict[str, Any]]:
         """
         Extract the current unanswered question, options, and their CSS selectors.
         Returns a dict: {"question": str, "options": List[str], "selectors": List[str]}
@@ -42,13 +42,32 @@ class BotBrowser:
             return None
 
         # Execute extraction script in the DOM context
-        js_extractor = """
-        () => {
+        js_extractor = r"""
+        (skipQuestionsArg) => {
+            const skipQuestions = new Set((skipQuestionsArg || []).map(q => (q || "").replace(/\s+/g, " ").trim()));
+
             // Find all question containers
             const containers = Array.from(document.querySelectorAll('ul.form-items > li, .form-items > li, li[data-type="OM"]'));
             
             let targetContainer = null;
             let isFallback = false;
+
+            const getQuestionData = (container) => {
+                const qEl = container.querySelector('.question, .pregunta');
+                if (qEl) {
+                    const clone = qEl.cloneNode(true);
+                    return {
+                        text: (clone.innerText || "").replace(/\s+/g, " ").trim(),
+                        html: qEl.outerHTML
+                    };
+                }
+                const pEl = container.querySelector('p, h2, h3, h4');
+                const source = pEl || container;
+                return {
+                    text: (source.innerText || "").replace(/\s+/g, " ").trim(),
+                    html: source.outerHTML
+                };
+            };
             
             if (containers.length > 0) {
                 for (const container of containers) {
@@ -57,6 +76,8 @@ class BotBrowser:
                     if (inputs.length > 0) {
                         const hasChecked = inputs.some(input => input.checked);
                         if (!hasChecked) {
+                            const qData = getQuestionData(container);
+                            if (skipQuestions.has(qData.text)) continue;
                             targetContainer = container;
                             break;
                         }
@@ -66,6 +87,8 @@ class BotBrowser:
                         if (textInputs.length > 0) {
                             const hasFilled = textInputs.some(input => input.value.trim() !== "");
                             if (!hasFilled) {
+                                const qData = getQuestionData(container);
+                                if (skipQuestions.has(qData.text)) continue;
                                 targetContainer = container;
                                 break;
                             }
@@ -83,6 +106,8 @@ class BotBrowser:
             if (!targetContainer) {
                 const questionEl = document.querySelector('.question, .pregunta, h1, h2, h3');
                 if (questionEl) {
+                    const questionText = (questionEl.innerText || "").replace(/\s+/g, " ").trim();
+                    if (skipQuestions.has(questionText)) return null;
                     targetContainer = document.body;
                     isFallback = true;
                 } else {
@@ -98,16 +123,9 @@ class BotBrowser:
                 questionText = qEl ? qEl.innerText : document.body.innerText;
                 questionHtml = qEl ? qEl.outerHTML : document.body.innerHTML;
             } else {
-                const qEl = targetContainer.querySelector('.question, .pregunta');
-                if (qEl) {
-                    const clone = qEl.cloneNode(true);
-                    questionText = clone.innerText;
-                    questionHtml = qEl.outerHTML;
-                } else {
-                    const pEl = targetContainer.querySelector('p, h2, h3, h4');
-                    questionText = pEl ? pEl.innerText : targetContainer.innerText;
-                    questionHtml = pEl ? pEl.outerHTML : targetContainer.outerHTML;
-                }
+                const qData = getQuestionData(targetContainer);
+                questionText = qData.text;
+                questionHtml = qData.html;
             }
             questionText = questionText.trim();
             
@@ -225,7 +243,7 @@ class BotBrowser:
         }
         """
         try:
-            return self.page.evaluate(js_extractor)
+            return self.page.evaluate(js_extractor, list(skip_questions or []))
         except Exception as e:
             print(f"[BROWSER ERROR] Failed to evaluate page: {e}")
             return None
