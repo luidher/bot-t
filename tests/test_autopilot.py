@@ -9,7 +9,12 @@ import random
 from unittest.mock import MagicMock
 
 from core.db_manager import DBManager
-from core.autopilot_runner import AutopilotRunner, _similarity
+from core.autopilot_runner import (
+    AutopilotRunner,
+    _classify_feedback_front,
+    _classify_feedback_front_text,
+    _similarity,
+)
 
 try:
     from core.browser import BotBrowser
@@ -94,6 +99,49 @@ class TestAutopilotRunnerHelpers(unittest.TestCase):
         self.assertEqual(_similarity("la capital de francia", "Francia Capital de la"), 1.0)
         self.assertEqual(_similarity("capital de francia", "capital de españa"), 0.5)
         self.assertEqual(_similarity("", "algo"), 0.0)
+
+    def test_classify_server_front_feedback(self) -> None:
+        payload = {
+            "success": True,
+            "front": [
+                {
+                    "tipo": "OM",
+                    "id_item": "V3Hqvu8AUVimMgLnTPv8yB0nGSXL5tq0yjpvdYbRLr8=",
+                    "class": "success",
+                },
+                {
+                    "tipo": "OM",
+                    "id_item": "05wNHxSLFM8A13WCn0GV4PLGYfPKFqbxVWGx/bI19MM=",
+                    "class": "wrong",
+                },
+            ],
+        }
+
+        self.assertEqual(
+            _classify_feedback_front(payload, "V3Hqvu8AUVimMgLnTPv8yB0nGSXL5tq0yjpvdYbRLr8="),
+            "correct",
+        )
+        self.assertEqual(
+            _classify_feedback_front(payload, "05wNHxSLFM8A13WCn0GV4PLGYfPKFqbxVWGx/bI19MM="),
+            "incorrect",
+        )
+        self.assertEqual(_classify_feedback_front(payload, "no-existe"), "unknown")
+
+    def test_classify_server_front_feedback_from_text(self) -> None:
+        text = """
+        front:
+        [{tipo: "OM", id_item: "V3Hqvu8AUVimMgLnTPv8yB0nGSXL5tq0yjpvdYbRLr8=", class: "success"},
+        {tipo: "OM", id_item: "05wNHxSLFM8A13WCn0GV4PLGYfPKFqbxVWGx/bI19MM=", class: "wrong"}]
+        """
+
+        self.assertEqual(
+            _classify_feedback_front_text(text, "V3Hqvu8AUVimMgLnTPv8yB0nGSXL5tq0yjpvdYbRLr8="),
+            "correct",
+        )
+        self.assertEqual(
+            _classify_feedback_front_text(text, "05wNHxSLFM8A13WCn0GV4PLGYfPKFqbxVWGx/bI19MM="),
+            "incorrect",
+        )
 
 
 class TestAutopilotRunnerMockFlows(unittest.TestCase):

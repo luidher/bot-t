@@ -470,6 +470,81 @@ def _classify_feedback_words(text: str) -> str:
     return "unknown"
 
 
+def _classify_server_front_item(class_name: Any) -> str:
+    class_norm = _normalize_feedback_text(class_name)
+    if not class_norm:
+        return "unknown"
+    if "wrong" in class_norm or "incorrect" in class_norm or "error" in class_norm:
+        return "incorrect"
+    if "success" in class_norm or "correct" in class_norm or "acert" in class_norm:
+        return "correct"
+    return _classify_feedback_words(class_norm)
+
+
+def _classify_feedback_front(node: Any, data_item: str) -> str:
+    """Lee el formato de servidor: front: [{id_item, class}, ...]."""
+    wanted = _normalize_feedback_text(data_item)
+    if not wanted:
+        return "unknown"
+
+    if isinstance(node, dict):
+        front = node.get("front")
+        if isinstance(front, list):
+            for item in front:
+                if not isinstance(item, dict):
+                    continue
+                item_id = _normalize_feedback_text(
+                    item.get("id_item")
+                    or item.get("data_item")
+                    or item.get("item")
+                    or item.get("id")
+                )
+                if item_id == wanted:
+                    return _classify_server_front_item(item.get("class") or item.get("status"))
+
+        for value in node.values():
+            result = _classify_feedback_front(value, data_item)
+            if result != "unknown":
+                return result
+
+    elif isinstance(node, list):
+        for item in node:
+            result = _classify_feedback_front(item, data_item)
+            if result != "unknown":
+                return result
+
+    return "unknown"
+
+
+def _classify_feedback_front_text(text: str, data_item: str) -> str:
+    """Fallback para respuestas tipo texto con id_item/class cerca."""
+    if not text or not data_item:
+        return "unknown"
+
+    positions = [match.start() for match in re.finditer(re.escape(data_item), text)]
+    if not positions:
+        norm_text = _normalize_feedback_text(text)
+        norm_item = _normalize_feedback_text(data_item)
+        positions = [match.start() for match in re.finditer(re.escape(norm_item), norm_text)]
+        text = norm_text
+
+    for pos in positions:
+        after = text[pos:pos + 500]
+        before = text[max(0, pos - 300):pos]
+        for window in (after, before):
+            class_match = re.search(
+                r"""["']?class["']?\s*[:=]\s*["']?([a-zA-Z_-]+)""",
+                window,
+                flags=re.IGNORECASE,
+            )
+            if class_match:
+                result = _classify_server_front_item(class_match.group(1))
+                if result != "unknown":
+                    return result
+
+    return "unknown"
+
+
 def _has_selected_value(value_text: str, data_op: str, option_text: str) -> bool:
     data_op_norm = _normalize_feedback_text(data_op)
     option_norm = _normalize_feedback_text(option_text)
@@ -911,16 +986,93 @@ class AutopilotRunner:
     # Validación de feedback por pregunta
     # ------------------------------------------------------------------
 
-    def _validar_pregunta(self, data_item: str) -> str:
+    def _classify_from_submit_payloads(self, data_item: str, opcion: dict | None = None) -> str:
+        """Busca feedback en las respuestas del servidor capturadas al calificar."""
+        option_text = (opcion or {}).get("texto", "")
+        data_op = (opcion or {}).get("data_op", "")
+
+        for payload in reversed(self._last_submit_payloads):
+            text = payload.get("text", "")
+            if not text:
+                continue
+
+            parsed: Any | None = None
+            content_type = payload.get("content_type", "")
+            if "json" in content_type:
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    parsed = None
+            if parsed is None:
+                stripped = text.strip()
+                if stripped.startswith("{") or stripped.startswith("["):
+                    try:
+                        parsed = json.loads(stripped)
+                    except Exception:
+                        parsed = None
+
+            if parsed is not None:
+                front_feedback = _classify_feedback_front(parsed, data_item)
+                if front_feedback != "unknown":
+                    return front_feedback
+
+                generic_feedback = _classify_feedback_json(parsed, data_item, data_op, option_text)
+                if generic_feedback != "unknown":
+                    return generic_feedback
+
+            payload_text = _normalize_feedback_text(text)
+            data_item_norm = _normalize_feedback_text(data_item)
+            if data_item_norm and data_item_norm in payload_text:
+                front_text_feedback = _classify_feedback_front_text(text, data_item)
+                if front_text_feedback != "unknown":
+                    return front_text_feedback
+
+                feedback = _classify_feedback_words(payload_text)
+                if feedback != "unknown":
+                    return feedback
+
+        return "unknown"
+
+    def _feedback_snapshot(self, data_item: str, opcion: dict | None = None) -> dict | None:
+        if not self.browser or not self.browser.page:
+            return None
+        payload = {
+            "data_item": data_item,
+            "selector": (opcion or {}).get("selector", ""),
+            "data_op": (opcion or {}).get("data_op", ""),
+        }
+        try:
+            snapshot = self.browser.page.evaluate(_JS_FEEDBACK_SNAPSHOT, payload)
+            return snapshot if isinstance(snapshot, dict) else None
+        except Exception:
+            return None
+
+    def _validar_pregunta(self, data_item: str, opcion: dict | None = None) -> str:
         """
-        Evalúa el DOM para determinar si la pregunta (por data-item) fue correcta.
+        Evalúa la respuesta del servidor y luego el DOM para determinar si acertó.
         Retorna: 'correct' | 'incorrect' | 'unknown'
         """
         if not self.browser or not self.browser.page:
             return "unknown"
+
+        server_feedback = self._classify_from_submit_payloads(data_item, opcion)
+        if server_feedback != "unknown":
+            self._log(f"  Feedback servidor id_item='{data_item[:24]}...' → {server_feedback}", "DEBUG")
+            return server_feedback
+
+        payload = {
+            "data_item": data_item,
+            "selector": (opcion or {}).get("selector", ""),
+            "data_op": (opcion or {}).get("data_op", ""),
+        }
         try:
-            result = self.browser.page.evaluate(_JS_VALIDATE_QUESTION, data_item)
-            return str(result)
+            result = self.browser.page.evaluate(_JS_VALIDATE_QUESTION, payload)
+            result = str(result)
+            if result == "unknown":
+                snapshot = self._feedback_snapshot(data_item, opcion)
+                if snapshot:
+                    self._log(f"  Diagnóstico feedback DOM id_item='{data_item[:24]}...': {snapshot}", "DEBUG")
+            return result
         except Exception as exc:
             self._log(f"Error al validar pregunta '{data_item}': {exc}", "WARNING")
             return "unknown"
@@ -1145,7 +1297,7 @@ class AutopilotRunner:
                     if opcion_elegida is None:
                         continue
 
-                    feedback = self._validar_pregunta(data_item)
+                    feedback = self._validar_pregunta(data_item, opcion_elegida)
                     self._log(
                         f"  Feedback '{pregunta_obj['question'][:40]}...' → {feedback} "
                         f"(opción: '{opcion_elegida['texto']}')",
