@@ -77,6 +77,8 @@ class AutopilotApp:
         self._browser: BotBrowser | None = None
         self._runner: AutopilotRunner | None = None
         self._runner_thread: threading.Thread | None = None
+        self._browser_cmd_queue: queue.Queue | None = None
+        self._closing = False
         self._log_queue: queue.Queue = queue.Queue()
         self._stats: dict = {}
 
@@ -264,33 +266,88 @@ class AutopilotApp:
         if not url or url == "https://":
             self._append_log("Por favor ingresa una URL válida.", "WARNING")
             return
+        if self._runner_thread and self._runner_thread.is_alive():
+            self._append_log("Ya hay un navegador abierto para esta sesión.", "WARNING")
+            return
 
         self._btn_open.config(state="disabled", text="Abriendo...")
         self._set_status("Abriendo navegador...", COLORS["warning"])
+        self._browser_cmd_queue = queue.Queue()
+        self._closing = False
 
-        def _open():
-            try:
-                self._browser = BotBrowser(headless=False)
-                self._browser.open(url, timeout_ms=120000)
-                self._log_queue.put(("INFO", "Navegador abierto. Haz login y luego presiona 'Iniciar Autopilot'."))
-                self.root.after(0, self._on_browser_ready)
-            except Exception as exc:
-                self._log_queue.put(("ERROR", f"Error al abrir el navegador: {exc}"))
-                self.root.after(0, lambda: (
-                    self._btn_open.config(state="normal", text="🌐  Abrir Navegador"),
-                    self._set_status("Error al abrir", COLORS["error"]),
-                ))
+        self._runner_thread = threading.Thread(
+            target=self._browser_worker,
+            args=(url, self._browser_cmd_queue),
+            daemon=True,
+        )
+        self._runner_thread.start()
 
-        threading.Thread(target=_open, daemon=True).start()
+    def _browser_worker(self, url: str, cmd_queue: queue.Queue) -> None:
+        """
+        Mantiene Playwright, el navegador y el Autopilot en el mismo thread.
+
+        Playwright sync no permite crear el browser en un thread y reutilizar
+        page/context desde otro; hacerlo produce errores tipo:
+        "cannot switch to a different thread".
+        """
+        browser: BotBrowser | None = None
+        try:
+            browser = BotBrowser(headless=False)
+            browser.open(url, timeout_ms=120000)
+            self._browser = browser
+            self._log_queue.put(("INFO", "Navegador abierto. Haz login y luego presiona 'Iniciar Autopilot'."))
+            self._ui_after(self._on_browser_ready)
+
+            while True:
+                cmd = cmd_queue.get()
+                if cmd == "run":
+                    self._run_autopilot_in_browser_thread(browser)
+                elif cmd == "close":
+                    break
+
+        except Exception as exc:
+            self._log_queue.put(("ERROR", f"Error al abrir el navegador: {exc}"))
+            self._ui_after(lambda: (
+                self._btn_open.config(state="normal", text="🌐  Abrir Navegador"),
+                self._set_status("Error al abrir", COLORS["error"]),
+            ))
+        finally:
+            if browser:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+            self._browser = None
+            self._runner = None
+            self._browser_cmd_queue = None
+
+    def _run_autopilot_in_browser_thread(self, browser: BotBrowser) -> None:
+        try:
+            self._runner = AutopilotRunner(
+                url="",  # El browser ya está abierto y posicionado
+                log_callback=lambda msg, lvl: self._log_queue.put((lvl, msg)),
+                stats_callback=lambda stats: self._ui_after(lambda: self._update_stats(stats)),
+                keep_browser_open=True,
+                browser=browser,
+            )
+            self._runner.run()
+        except Exception as exc:
+            self._log_queue.put(("ERROR", f"Error crítico en Autopilot: {exc}"))
+        finally:
+            self._runner = None
+            self._ui_after(self._on_runner_finished)
 
     def _on_browser_ready(self) -> None:
-        self._btn_open.config(state="normal", text="🌐  Abrir Navegador")
+        self._btn_open.config(state="disabled", text="Navegador abierto")
         self._btn_start.config(state="normal")
         self._set_status("Navegador listo — haz login y presiona Iniciar", COLORS["success"])
 
     def _on_start(self) -> None:
-        if self._runner_thread and self._runner_thread.is_alive():
+        if self._runner:
             self._append_log("El Autopilot ya está en ejecución.", "WARNING")
+            return
+        if not self._browser or not self._browser_cmd_queue:
+            self._append_log("Primero abre el navegador y navega al cuestionario.", "WARNING")
             return
 
         self._btn_start.config(state="disabled")
@@ -298,23 +355,7 @@ class AutopilotApp:
         self._btn_open.config(state="disabled")
         self._set_status("● Ejecutando...", COLORS["accent"])
 
-        def _run():
-            try:
-                self._runner = AutopilotRunner(
-                    url="",  # El browser ya está abierto y posicionado
-                    log_callback=lambda msg, lvl: self._log_queue.put((lvl, msg)),
-                    stats_callback=lambda stats: self.root.after(0, lambda: self._update_stats(stats)),
-                    keep_browser_open=True,
-                    browser=self._browser,  # Reutilizar el browser ya abierto
-                )
-                self._runner.run()
-            except Exception as exc:
-                self._log_queue.put(("ERROR", f"Error crítico en Autopilot: {exc}"))
-            finally:
-                self.root.after(0, self._on_runner_finished)
-
-        self._runner_thread = threading.Thread(target=_run, daemon=True)
-        self._runner_thread.start()
+        self._browser_cmd_queue.put("run")
 
     def _on_stop(self) -> None:
         if self._runner:
@@ -325,7 +366,10 @@ class AutopilotApp:
     def _on_runner_finished(self) -> None:
         self._btn_start.config(state="normal")
         self._btn_stop.config(state="disabled")
-        self._btn_open.config(state="normal")
+        if self._browser and self._browser_cmd_queue:
+            self._btn_open.config(state="disabled", text="Navegador abierto")
+        else:
+            self._btn_open.config(state="normal", text="🌐  Abrir Navegador")
         self._set_status("● Inactivo", COLORS["text_muted"])
 
     # ------------------------------------------------------------------
@@ -364,16 +408,25 @@ class AutopilotApp:
             pass
         self.root.after(80, self._poll_log_queue)
 
+    def _ui_after(self, callback) -> None:
+        if self._closing:
+            return
+        try:
+            self.root.after(0, callback)
+        except tk.TclError:
+            pass
+
     # ------------------------------------------------------------------
     # Cierre limpio
     # ------------------------------------------------------------------
 
     def _on_close(self) -> None:
+        self._closing = True
         if self._runner:
             self._runner.stop()
-        if self._browser:
+        if self._browser_cmd_queue:
             try:
-                self._browser.close()
+                self._browser_cmd_queue.put("close")
             except Exception:
                 pass
         self.root.destroy()
