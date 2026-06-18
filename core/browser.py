@@ -14,7 +14,7 @@ class BotBrowser:
         self._context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
 
-    def open(self, url: str, timeout_ms: int = 30000) -> None:
+    def open(self, url: str, timeout_ms: int = 120000) -> None:
         """Launch browser and open the target URL."""
         if not self._playwright:
             self._playwright = sync_playwright().start()
@@ -35,20 +35,34 @@ class BotBrowser:
     def read_page(self, skip_questions: Optional[set[str] | list[str]] = None) -> Optional[Dict[str, Any]]:
         """
         Extract the current unanswered question, options, and their CSS selectors.
-        Returns a dict: {"question": str, "options": List[str], "selectors": List[str]}
-        or None if no question is found or all questions on page are answered.
+
+        Returns a dict with keys:
+          - question: str — texto visible de la pregunta
+          - question_html: str
+          - question_selector: str
+          - question_data_item: str — atributo data-item del <li> contenedor (ID de pregunta en el DOM)
+          - options: List[str] — textos visibles de cada opción
+          - options_html: List[str]
+          - selectors: List[str] — selector único del <input>
+          - option_selectors: List[str] — selector del elemento clickable (label o input)
+          - data_ops: List[str] — valor data-op de cada input ('' si no tiene)
+          - media_selectors: List[str]
+          - media_elements: List[dict]
+
+        Returns None if no question is found or all questions on page are answered.
         """
         if not self.page:
             return None
 
-        # Execute extraction script in the DOM context
         js_extractor = r"""
         (skipQuestionsArg) => {
             const skipQuestions = new Set((skipQuestionsArg || []).map(q => (q || "").replace(/\s+/g, " ").trim()));
 
-            // Find all question containers
-            const containers = Array.from(document.querySelectorAll('ul.form-items > li, .form-items > li, li[data-type="OM"]'));
-            
+            // ── Selector de contenedores de preguntas ──────────────────────
+            const containers = Array.from(document.querySelectorAll(
+                'ul.form-items > li, .form-items > li, li[data-type="OM"]'
+            ));
+
             let targetContainer = null;
             let isFallback = false;
 
@@ -68,11 +82,13 @@ class BotBrowser:
                     html: source.outerHTML
                 };
             };
-            
+
+            // ── Buscar primer contenedor sin responder ──────────────────────
             if (containers.length > 0) {
                 for (const container of containers) {
-                    // Check if this container has radio/checkbox inputs, and if any is checked
-                    const inputs = Array.from(container.querySelectorAll('input[type="radio"], input[type="checkbox"]'));
+                    const inputs = Array.from(container.querySelectorAll(
+                        'input[type="radio"], input[type="checkbox"]'
+                    ));
                     if (inputs.length > 0) {
                         const hasChecked = inputs.some(input => input.checked);
                         if (!hasChecked) {
@@ -82,8 +98,9 @@ class BotBrowser:
                             break;
                         }
                     } else {
-                        // Check for text inputs or textareas
-                        const textInputs = Array.from(container.querySelectorAll('input[type="text"], textarea'));
+                        const textInputs = Array.from(container.querySelectorAll(
+                            'input[type="text"], textarea'
+                        ));
                         if (textInputs.length > 0) {
                             const hasFilled = textInputs.some(input => input.value.trim() !== "");
                             if (!hasFilled) {
@@ -96,13 +113,13 @@ class BotBrowser:
                     }
                 }
             }
-            
-            // If all containers are answered
+
+            // Si todos los contenedores están contestados → null para avanzar hoja
             if (!targetContainer && containers.length > 0) {
                 return null;
             }
-            
-            // Fallback: look for general question elements
+
+            // Fallback: buscar elementos de pregunta directamente
             if (!targetContainer) {
                 const questionEl = document.querySelector('.question, .pregunta, h1, h2, h3');
                 if (questionEl) {
@@ -114,8 +131,13 @@ class BotBrowser:
                     return null;
                 }
             }
-            
-            // Extract question text and html
+
+            // ── Extraer data-item del contenedor (ID de pregunta en el DOM) ──
+            const questionDataItem = targetContainer.getAttribute
+                ? (targetContainer.getAttribute('data-item') || "")
+                : "";
+
+            // ── Texto e HTML de la pregunta ────────────────────────────────
             let questionText = "";
             let questionHtml = "";
             if (isFallback) {
@@ -128,30 +150,20 @@ class BotBrowser:
                 questionHtml = qData.html;
             }
             questionText = questionText.trim();
-            
-            // Clean up question text (remove image alt text or extra whitespace)
-            questionText = questionText.replace(/\\s+/g, ' ');
-            
-            const options = [];
-            const optionsHtml = [];
-            const selectors = [];
-            const optionSelectors = [];
-            
-            // Find all input radio/checkbox elements in the target container
-            const optionInputs = Array.from(targetContainer.querySelectorAll('input[type="radio"], input[type="checkbox"]'));
-            
-            // Helper function to generate unique CSS selector for an element
+
+            // ── Helper para generar selector único de un elemento ──────────
             const getUniqueSelector = (el) => {
                 if (el.id) {
                     return `#${el.id}`;
                 }
-                if (el.getAttribute('data-op')) {
-                    return `input[data-op="${el.getAttribute('data-op').replace(/"/g, '\\"')}"]`;
+                if (el.getAttribute && el.getAttribute('data-op')) {
+                    const dataOp = el.getAttribute('data-op').replace(/"/g, '\\"');
+                    return `input[data-op="${dataOp}"]`;
                 }
                 if (el.name && el.value) {
                     return `input[name="${el.name.replace(/"/g, '\\"')}"][value="${el.value.replace(/"/g, '\\"')}"]`;
                 }
-                // Fallback to absolute/nth-child path
+                // Fallback a nth-child path
                 const path = [];
                 let curr = el;
                 while (curr && curr.nodeType === Node.ELEMENT_NODE) {
@@ -169,17 +181,35 @@ class BotBrowser:
 
             const questionSelector = (() => {
                 if (isFallback) {
-                    return getUniqueSelector(document.querySelector('.question, .pregunta') || document.body);
+                    return getUniqueSelector(
+                        document.querySelector('.question, .pregunta') || document.body
+                    );
                 }
                 const qEl = targetContainer.querySelector('.question, .pregunta, p, h2, h3, h4');
                 return getUniqueSelector(qEl || targetContainer);
             })();
-            
+
+            // ── Opciones ───────────────────────────────────────────────────
+            const options = [];
+            const optionsHtml = [];
+            const selectors = [];
+            const optionSelectors = [];
+            const dataOps = [];
+
+            const optionInputs = Array.from(
+                targetContainer.querySelectorAll('input[type="radio"], input[type="checkbox"]')
+            );
+
             for (const input of optionInputs) {
+                // Capturar data-op (identificador único de la opción)
+                const dataOp = input.getAttribute('data-op') || "";
+                dataOps.push(dataOp);
+
                 let labelText = "";
                 let labelHtml = "";
                 let optionElement = null;
                 let parent = input.parentElement;
+
                 while (parent && parent !== targetContainer) {
                     if (parent.tagName === 'LABEL') {
                         labelText = parent.innerText;
@@ -189,7 +219,7 @@ class BotBrowser:
                     }
                     parent = parent.parentElement;
                 }
-                
+
                 if (!labelText && input.id) {
                     const label = document.querySelector(`label[for="${input.id}"]`);
                     if (label) {
@@ -198,24 +228,27 @@ class BotBrowser:
                         optionElement = label;
                     }
                 }
-                
+
                 if (!labelText) {
                     labelText = input.parentElement ? input.parentElement.innerText : "";
                     labelHtml = input.parentElement ? input.parentElement.outerHTML : "";
                     optionElement = input.parentElement || input;
                 }
-                
+
                 labelText = labelText.trim();
                 options.push(labelText);
                 optionsHtml.push(labelHtml);
                 selectors.push(getUniqueSelector(input));
                 optionSelectors.push(getUniqueSelector(optionElement || input));
             }
-            
+
+            // ── Elementos multimedia ───────────────────────────────────────
             const mediaSelectors = [];
             const mediaElementsData = [];
             if (targetContainer) {
-                const mediaElements = Array.from(targetContainer.querySelectorAll('img, svg, canvas, table, iframe'));
+                const mediaElements = Array.from(
+                    targetContainer.querySelectorAll('img, svg, canvas, table, iframe')
+                );
                 for (const media of mediaElements) {
                     const sel = getUniqueSelector(media);
                     mediaSelectors.push(sel);
@@ -228,15 +261,17 @@ class BotBrowser:
                     });
                 }
             }
-            
+
             return {
                 question: questionText,
                 question_html: questionHtml,
                 question_selector: questionSelector,
+                question_data_item: questionDataItem,
                 options: options,
                 options_html: optionsHtml,
                 selectors: selectors,
                 option_selectors: optionSelectors,
+                data_ops: dataOps,
                 media_selectors: mediaSelectors,
                 media_elements: mediaElementsData
             };
@@ -265,10 +300,8 @@ class BotBrowser:
         if not self.page:
             return False
         try:
-            # Scroll to make sure it's visible/clickable
             self.page.locator(selector).scroll_into_view_if_needed()
             self.page.click(selector, timeout=timeout_ms)
-            # Wait for either load state or longer timeout
             self.page.wait_for_load_state("load", timeout=timeout_ms)
             time.sleep(1.0)
             return True

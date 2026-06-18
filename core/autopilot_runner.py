@@ -1,14 +1,17 @@
 """
 autopilot_runner.py — Motor de bucle para el Modo Autopilot DB.
 
+Módulo completamente independiente: no requiere PyQt5, widget ni config externo.
+
 Implementa:
-  - Extracción DOM de preguntas y opciones.
-  - Clic por índice/selector en Playwright.
+  - Extracción DOM de preguntas y opciones (incluyendo data-op).
+  - Clic por selector en Playwright con fallbacks.
   - Validación de acierto leyendo clases CSS del DOM.
   - Recarga de hoja (botón Reintentar o page.reload()).
-  - Avance de hoja (botón Siguiente).
-  - Bucle principal Paso A → B → C definido en las instrucciones.
-  - Thread Qt (AutopilotRunnerThread) compatible con el widget existente.
+  - Avance de hoja (botón Siguiente) solo cuando todas las respuestas son correctas.
+  - Bucle principal: Paso A (extraer) → B (responder) → C (avanzar).
+  - Guardado en BD por data-op (selector estable) + texto visible.
+  - Thread Qt (AutopilotRunnerThread) opcional, compatible con el widget existente.
 """
 from __future__ import annotations
 
@@ -41,8 +44,15 @@ def _load_autopilot_config() -> dict[str, Any]:
             "option_label": "label",
             "correct_markers": [".correct", "[class*='correct']", "[class*='success']"],
             "incorrect_markers": [".incorrect", "[class*='incorrect']", "[class*='wrong']", "[class*='error']"],
-            "next_button": ["button.next", "a.next", ".btn-next", ".next-page", "button[class*='siguiente']"],
-            "retry_button": ["button.retry", ".reintentar", "button[class*='retry']"],
+            "next_button": [
+                "button.next", "a.next", ".btn-next", ".next-page",
+                "button[class*='siguiente']", "input[type='submit'][value*='iguiente']",
+                "button[class*='next']",
+            ],
+            "retry_button": [
+                "button.retry", ".reintentar", "button[class*='retry']",
+                "button[class*='reintentar']", ".btn-retry", "button[onclick*='reload']",
+            ],
         },
         "timings": {
             "feedback_wait_ms": 900,
@@ -57,7 +67,8 @@ def _load_autopilot_config() -> dict[str, Any]:
             "manual_auth_poll_sec": 1.0,
         },
         "browser": {
-            "keep_open": False
+            "keep_open": False,
+            "pw_timeout_ms": 120000
         },
         "limits": {
             "max_sheets": 10000,
@@ -69,7 +80,6 @@ def _load_autopilot_config() -> dict[str, Any]:
     try:
         with open(AUTOPILOT_CONFIG_FILE, "r", encoding="utf-8") as fh:
             data = json.load(fh)
-        # Merge profundo para que falten claves no rompan nada
         for section, values in defaults.items():
             if section not in data:
                 data[section] = values
@@ -83,109 +93,17 @@ def _load_autopilot_config() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# JavaScript de extracción DOM
+# JavaScript de validación y navegación
 # ---------------------------------------------------------------------------
-
-_JS_EXTRACT = r"""
-() => {
-    const cfg = {
-        containerSel: "ul.form-items > li, .form-items > li, li[data-type='OM']",
-        questionSel:  ".question, .pregunta, p, h2, h3, h4",
-        inputSel:     "input[type='radio'], input[type='checkbox']"
-    };
-
-    // Buscar el primer contenedor con inputs SIN marcar
-    const containers = Array.from(document.querySelectorAll(cfg.containerSel));
-    let target = null;
-
-    for (const c of containers) {
-        const inputs = Array.from(c.querySelectorAll(cfg.inputSel));
-        if (inputs.length > 0 && !inputs.some(i => i.checked)) {
-            target = c;
-            break;
-        }
-    }
-
-    // Si todos están contestados, devolvemos null para avanzar hoja
-    if (!target && containers.length > 0) return null;
-
-    // Fallback: buscar pregunta directa en el body
-    if (!target) {
-        const qEl = document.querySelector(cfg.questionSel);
-        if (!qEl) return null;
-        target = document.body;
-    }
-
-    // Texto de la pregunta
-    const qEl = target.querySelector(cfg.questionSel) || target;
-    const questionText = (qEl.innerText || "").replace(/\s+/g, " ").trim();
-
-    // Opciones
-    const inputs = Array.from(target.querySelectorAll(cfg.inputSel));
-    const options = [];
-
-    const getSelector = (el) => {
-        if (el.id) return "#" + el.id;
-        if (el.getAttribute("data-op"))
-            return `input[data-op="${el.getAttribute("data-op")}"]`;
-        if (el.name && el.value)
-            return `input[name="${el.name}"][value="${el.value}"]`;
-        // nth-child fallback
-        const parts = [];
-        let cur = el;
-        while (cur && cur !== document.body) {
-            const tag = cur.nodeName.toLowerCase();
-            let nth = 1;
-            let sib = cur;
-            while ((sib = sib.previousElementSibling)) nth++;
-            parts.unshift(tag + ":nth-child(" + nth + ")");
-            cur = cur.parentElement;
-        }
-        return parts.join(" > ");
-    };
-
-    for (const input of inputs) {
-        // Buscar label asociado
-        let labelText = "";
-        let parent = input.parentElement;
-        while (parent && parent !== target) {
-            if (parent.tagName === "LABEL") { labelText = parent.innerText; break; }
-            parent = parent.parentElement;
-        }
-        if (!labelText && input.id) {
-            const lbl = document.querySelector(`label[for="${input.id}"]`);
-            if (lbl) labelText = lbl.innerText;
-        }
-        if (!labelText) labelText = input.parentElement ? input.parentElement.innerText : "";
-
-        // Buscar padre clickable (label o contenedor de opción)
-        let clickEl = input;
-        let p = input.parentElement;
-        while (p && p !== target) {
-            if (p.tagName === "LABEL") { clickEl = p; break; }
-            p = p.parentElement;
-        }
-
-        options.push({
-            texto:    labelText.replace(/\s+/g, " ").trim(),
-            selector: getSelector(input),
-            clickSelector: getSelector(clickEl),
-        });
-    }
-
-    return { question: questionText, options };
-}
-"""
 
 _JS_VALIDATE = r"""
 (selector) => {
-    // Verifica si el elemento (o sus ancestros/descendientes) tiene una clase de acierto/error
     try {
         const el = document.querySelector(selector);
         if (!el) return "unknown";
 
-        const correctKeywords   = ["correct", "success", "right", "acert", "verdad"];
-        const incorrectKeywords = ["incorrect", "wrong", "error", "fail", "incorrecto"];
+        const correctKeywords   = ["correct", "success", "right", "acert", "verdad", "correcto"];
+        const incorrectKeywords = ["incorrect", "wrong", "error", "fail", "incorrecto", "erroneo"];
 
         const checkEl = (node) => {
             const cls = (node.className || "").toLowerCase();
@@ -195,18 +113,18 @@ _JS_VALIDATE = r"""
             return null;
         };
 
-        // Checar el propio input y su label/parent
+        // Checar el propio elemento y hasta 5 ancestros
         let node = el;
-        for (let i = 0; i < 5; i++) {
+        for (let i = 0; i < 6; i++) {
             const r = checkEl(node);
             if (r) return r;
             if (!node.parentElement || node === document.body) break;
             node = node.parentElement;
         }
 
-        // Checar hijos del ancestro (li) por clases de resultado
+        // Checar el <li> ancestro (contenedor de opción)
         let ancestor = el;
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < 4; i++) {
             if (!ancestor.parentElement) break;
             ancestor = ancestor.parentElement;
         }
@@ -249,33 +167,49 @@ _JS_FIND_BUTTON = r"""
 
 
 # ---------------------------------------------------------------------------
-# AutopilotRunner
+# AutopilotRunner — Motor independiente
 # ---------------------------------------------------------------------------
 
 class AutopilotRunner:
     """
-    Motor del Modo Autopilot DB.
+    Motor del Modo Autopilot DB. Completamente independiente de PyQt5/widget.
 
     Flujo por hoja:
-      A. Extraer preguntas y opciones.
-      B. Por cada pregunta: consultar DB → responder desde DB
-         o probar al azar hasta acertar y guardar en DB.
+      A. Extraer preguntas y opciones (incluyendo data-op).
+      B. Por cada pregunta: consultar DB por hash → responder desde DB
+         (usando data-op si disponible) o probar al azar hasta acertar
+         y guardar en DB.
       C. Cuando no quedan preguntas sin responder → ir a la siguiente hoja.
+
+    Parámetros:
+      url             — URL del cuestionario a resolver.
+      log_callback    — fn(msg: str, level: str) para recibir logs.
+      stats_callback  — fn(stats: dict) para recibir estadísticas en tiempo real.
+      keep_browser_open — mantener el navegador abierto tras terminar.
+      browser         — instancia BotBrowser preexistente (opcional).
+                        Si se pasa, NO se abre una URL nueva; se usa la página actual.
     """
 
     def __init__(
         self,
-        url: str,
-        bot_config: dict[str, Any],
+        url: str = "",
         log_callback: Callable[[str, str], None] | None = None,
         stats_callback: Callable[[dict], None] | None = None,
         keep_browser_open: bool = False,
+        browser: Optional["BotBrowser"] = None,
+        bot_config: dict[str, Any] | None = None,  # compat con widget
     ) -> None:
         self.url = url
-        self.bot_config = bot_config.dict() if hasattr(bot_config, "dict") and callable(getattr(bot_config, "dict")) else bot_config
         self.log_cb = log_callback or (lambda msg, lvl: print(f"[{lvl}] {msg}"))
         self.stats_cb = stats_callback or (lambda _: None)
         self.keep_browser_open = keep_browser_open
+
+        # bot_config es opcional; solo se usa pw_timeout_ms y pw_headless
+        _cfg = bot_config or {}
+        if hasattr(_cfg, "dict") and callable(getattr(_cfg, "dict")):
+            _cfg = _cfg.dict()
+        self._pw_timeout_ms: int = int(_cfg.get("pw_timeout_ms", 120000))
+        self._pw_headless: bool = bool(_cfg.get("pw_headless", False))
 
         self.ap_cfg = _load_autopilot_config()
         self.timings = self.ap_cfg["timings"]
@@ -283,7 +217,8 @@ class AutopilotRunner:
         self.auth_cfg = self.ap_cfg["auth"]
 
         self.db = DBManager()
-        self.browser: Optional["BotBrowser"] = None
+        self.browser: Optional["BotBrowser"] = browser
+        self._owned_browser = browser is None  # solo cerramos el browser si lo creamos nosotros
         self.failed_questions_in_sheet: set[str] = set()
 
         # Estadísticas de sesión
@@ -304,11 +239,6 @@ class AutopilotRunner:
 
     def stop(self) -> None:
         self._running = False
-        if self.browser:
-            try:
-                self.browser.close()
-            except Exception:
-                pass
 
     def pause(self) -> None:
         self._paused = True
@@ -328,8 +258,43 @@ class AutopilotRunner:
         self.stats_cb(dict(self.stats))
 
     # ------------------------------------------------------------------
-    # Funciones auxiliares de DOM
+    # Normalización de datos de página
     # ------------------------------------------------------------------
+
+    def _normalize_page_question(self, page_data: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Convierte BotBrowser.read_page al formato usado internamente por Autopilot."""
+        if not page_data:
+            return None
+
+        question = str(page_data.get("question") or "").strip()
+        raw_options = list(page_data.get("options") or [])
+        selectors = list(page_data.get("selectors") or [])
+        click_selectors = list(page_data.get("option_selectors") or selectors)
+        data_ops = list(page_data.get("data_ops") or [])
+
+        options: list[dict[str, str | None]] = []
+        for idx, text in enumerate(raw_options):
+            option_text = str(text or "").strip()
+            selector = selectors[idx] if idx < len(selectors) else ""
+            click_selector = click_selectors[idx] if idx < len(click_selectors) else selector
+            data_op = data_ops[idx] if idx < len(data_ops) else ""
+            if not option_text or not selector:
+                continue
+            options.append({
+                "texto": option_text,
+                "selector": selector,
+                "clickSelector": click_selector or selector,
+                "data_op": data_op,
+            })
+
+        if not question:
+            return None
+
+        return {
+            "question": question,
+            "options": options,
+            "data_item": str(page_data.get("question_data_item") or ""),
+        }
 
     def extraer_preguntas_y_opciones(self) -> list[dict] | None:
         """
@@ -343,46 +308,18 @@ class AutopilotRunner:
             question = self._normalize_page_question(result)
             if not question:
                 return None
-            # Devolvemos como lista de una pregunta (la primera sin responder)
             return [question]
         except Exception as exc:
             self._log(f"Error al extraer preguntas del DOM: {exc}", "ERROR")
             return None
 
-    def _normalize_page_question(self, page_data: dict[str, Any] | None) -> dict[str, Any] | None:
-        """Convierte BotBrowser.read_page al formato usado internamente por Autopilot."""
-        if not page_data:
-            return None
-
-        question = str(page_data.get("question") or "").strip()
-        raw_options = list(page_data.get("options") or [])
-        selectors = list(page_data.get("selectors") or [])
-        click_selectors = list(page_data.get("option_selectors") or selectors)
-
-        options: list[dict[str, str | None]] = []
-        for idx, text in enumerate(raw_options):
-            option_text = str(text or "").strip()
-            selector = selectors[idx] if idx < len(selectors) else ""
-            click_selector = click_selectors[idx] if idx < len(click_selectors) else selector
-            if not option_text or not selector:
-                continue
-            options.append(
-                {
-                    "texto": option_text,
-                    "selector": selector,
-                    "clickSelector": click_selector or selector,
-                }
-            )
-
-        if not question:
-            return None
-
-        return {"question": question, "options": options}
+    # ------------------------------------------------------------------
+    # Espera de autenticación manual
+    # ------------------------------------------------------------------
 
     def _wait_for_manual_auth_and_questions(self) -> bool:
         """
-        Deja el navegador abierto para login manual y empieza cuando hay pregunta.
-        El chequeo usa el mismo extractor DOM del resto de modos.
+        Deja el navegador abierto para login manual y comienza cuando detecta preguntas.
         """
         if not self.auth_cfg.get("wait_for_manual_auth", True):
             return True
@@ -405,10 +342,10 @@ class AutopilotRunner:
             page_data = self.browser.read_page()
             question = self._normalize_page_question(page_data)
             if question and question.get("options"):
-                self._log("Pregunta detectada después de la autenticación. Iniciando flujo Autopilot DB.", "SUCCESS")
+                self._log("Pregunta detectada. Iniciando flujo Autopilot DB.", "SUCCESS")
                 return True
             if self._page_has_next_button():
-                self._log("Navegación de hoja detectada después de la autenticación. Iniciando flujo Autopilot DB.", "SUCCESS")
+                self._log("Botón Siguiente detectado. Iniciando flujo Autopilot DB.", "SUCCESS")
                 return True
 
             if not notified_wait:
@@ -417,7 +354,7 @@ class AutopilotRunner:
 
             if timeout_sec > 0 and time.monotonic() - started_at >= timeout_sec:
                 self._log(
-                    f"No se detectaron preguntas después de {timeout_sec:.0f}s de espera manual.",
+                    f"No se detectaron preguntas después de {timeout_sec:.0f}s de espera.",
                     "ERROR",
                 )
                 return False
@@ -435,8 +372,12 @@ class AutopilotRunner:
         except Exception:
             return False
 
+    # ------------------------------------------------------------------
+    # Clic en opciones
+    # ------------------------------------------------------------------
+
     def hacer_clic_en_opcion(self, selector: str, click_selector: str | None = None) -> bool:
-        """Hace clic en el input de la opción dada por selector."""
+        """Hace clic en la opción dada por selector."""
         if not self.browser or not self.browser.page:
             return False
         target = click_selector or selector
@@ -447,41 +388,12 @@ class AutopilotRunner:
         self._log(f"Error al hacer clic en '{selector}' con todos los fallbacks.", "WARNING")
         return False
 
-    def validar_acierto(self, selector: str) -> str:
-        """
-        Evalúa el DOM para determinar si el clic fue correcto.
-        Retorna: 'correct' | 'incorrect' | 'unknown'
-        """
-        if not self.browser or not self.browser.page:
-            return "unknown"
-        try:
-            time.sleep(self.timings["feedback_wait_ms"] / 1000)
-            result = self.browser.page.evaluate(_JS_VALIDATE, selector)
-            return str(result)
-        except Exception as exc:
-            self._log(f"Error al validar acierto: {exc}", "WARNING")
-            return "unknown"
-
     def _js_click_selector(self, selector: str) -> bool:
         if not self.browser or not self.browser.page:
             return False
         try:
             clicked = self.browser.page.evaluate(
                 r"""(sel) => {
-                    const normalized = sel.trim();
-                    const textMatch = normalized.match(/:has-text\(\s*["']([^"']+)["']\s*\)/);
-                    if (textMatch) {
-                        const expected = textMatch[1].trim();
-                        const candidates = Array.from(document.querySelectorAll('button, a, input, label, span, div'));
-                        for (const node of candidates) {
-                            const value = ((node.innerText || node.value || "") + "").trim();
-                            if (value.includes(expected)) {
-                                node.click();
-                                return true;
-                            }
-                        }
-                        return false;
-                    }
                     const el = document.querySelector(sel);
                     if (!el) return false;
                     el.click();
@@ -507,32 +419,49 @@ class AutopilotRunner:
                 continue
         return self._js_click_selector(selector)
 
+    # ------------------------------------------------------------------
+    # Validación de acierto
+    # ------------------------------------------------------------------
+
+    def validar_acierto(self, selector: str) -> str:
+        """
+        Evalúa el DOM para determinar si el clic fue correcto.
+        Retorna: 'correct' | 'incorrect' | 'unknown'
+        """
+        if not self.browser or not self.browser.page:
+            return "unknown"
+        try:
+            time.sleep(self.timings["feedback_wait_ms"] / 1000)
+            result = self.browser.page.evaluate(_JS_VALIDATE, selector)
+            return str(result)
+        except Exception as exc:
+            self._log(f"Error al validar acierto: {exc}", "WARNING")
+            return "unknown"
+
+    # ------------------------------------------------------------------
+    # Navegación entre hojas
+    # ------------------------------------------------------------------
+
     def recargar_hoja_actual(self) -> bool:
-        """
-        Recarga la hoja actual sin avanzar a la siguiente.
-        Intenta botón Reintentar → sino reload de la URL.
-        """
+        """Recarga la hoja actual sin avanzar a la siguiente."""
         if not self.browser or not self.browser.page:
             return False
 
         retry_selectors = self.ap_cfg["selectors"]["retry_button"]
-
-        # Buscar botón de reintento
         try:
             found_sel = self.browser.page.evaluate(_JS_FIND_BUTTON, retry_selectors)
             if found_sel:
                 self._log("Botón 'Reintentar' encontrado. Haciendo clic...", "INFO")
                 if self._click_selector_with_fallback(found_sel):
-                    self.browser.page.wait_for_load_state("load", timeout=8000)
+                    self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
                     return True
-                self._log("Clic en el botón 'Reintentar' falló. Intentando recarga manual...", "WARNING")
+                self._log("Clic en 'Reintentar' falló. Intentando recarga manual...", "WARNING")
         except Exception:
             pass
 
-        # Fallback: recargar la URL
         self._log("Recargando la URL actual para reiniciar la hoja...", "INFO")
         try:
-            self.browser.page.reload(timeout=10000, wait_until="load")
+            self.browser.page.reload(timeout=self._pw_timeout_ms, wait_until="load")
             time.sleep(self.timings["reload_wait_ms"] / 1000)
             return True
         except Exception as exc:
@@ -540,39 +469,29 @@ class AutopilotRunner:
             return False
 
     def ir_a_siguiente_hoja(self) -> bool:
-        """
-        Hace clic en el botón 'Siguiente' y espera la carga de la nueva hoja.
-        """
+        """Hace clic en el botón 'Siguiente' y espera la carga de la nueva hoja."""
         if not self.browser or not self.browser.page:
             return False
 
         next_selectors = self.ap_cfg["selectors"]["next_button"]
-
         try:
             found_sel = self.browser.page.evaluate(_JS_FIND_BUTTON, next_selectors)
             if found_sel:
-                self._log(f"Botón 'Siguiente' encontrado ({found_sel}). Avanzando...", "INFO")
+                self._log(f"Botón 'Siguiente' encontrado. Avanzando...", "INFO")
                 if self._click_selector_with_fallback(found_sel):
                     time.sleep(self.timings["next_wait_ms"] / 1000)
-                    self.browser.page.wait_for_load_state(
-                        "load",
-                        timeout=self.bot_config.get("pw_timeout_ms", 30000),
-                    )
+                    self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
                     return True
-                self._log("Clic en el botón 'Siguiente' falló. Intentando otro selector...", "WARNING")
+                self._log("Clic en 'Siguiente' falló. Intentando otro selector...", "WARNING")
         except Exception:
             pass
 
-        # Fallback: buscar con Playwright locator con texto
         for text_hint in ["Siguiente", "Next", "Continuar", "Submit", "Enviar"]:
             try:
                 selector = f"button:has-text('{text_hint}'), a:has-text('{text_hint}')"
                 if self._click_selector_with_fallback(selector):
                     time.sleep(self.timings["next_wait_ms"] / 1000)
-                    self.browser.page.wait_for_load_state(
-                        "load",
-                        timeout=self.bot_config.get("pw_timeout_ms", 30000),
-                    )
+                    self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
                     self._log(f"Avanzado con botón '{text_hint}'.", "SUCCESS")
                     return True
             except Exception:
@@ -600,25 +519,25 @@ class AutopilotRunner:
         """
         self._running = True
         self._log("=== Modo Autopilot DB INICIADO ===", "SUCCESS")
-        self._log(f"URL objetivo: {self.url}", "INFO")
         self._log(f"Registros en BD al inicio: {self.db.contar_registros()}", "INFO")
 
-        # Abrir navegador
+        # Abrir navegador si no se proporcionó uno externo
         opened_browser = False
         if not self.browser:
             from core.browser import BotBrowser
-
-            self.browser = BotBrowser(headless=self.bot_config.get("pw_headless", False))
-            try:
-                self.browser.open(
-                    self.url,
-                    timeout_ms=self.bot_config.get("pw_timeout_ms", 10000),
-                )
-                opened_browser = True
-            except Exception as exc:
-                self._log(f"Error al abrir el navegador: {exc}", "ERROR")
-                self._shutdown()
-                return
+            self.browser = BotBrowser(headless=self._pw_headless)
+            self._owned_browser = True
+            if self.url:
+                try:
+                    self.browser.open(self.url, timeout_ms=self._pw_timeout_ms)
+                    opened_browser = True
+                    self._log(f"Navegador abierto en: {self.url}", "INFO")
+                except Exception as exc:
+                    self._log(f"Error al abrir el navegador: {exc}", "ERROR")
+                    self._shutdown()
+                    return
+            else:
+                self._log("No se proporcionó URL; asumiendo navegador ya en posición.", "WARNING")
 
         if opened_browser and not self._wait_for_manual_auth_and_questions():
             self._shutdown()
@@ -627,7 +546,7 @@ class AutopilotRunner:
         max_hojas = self.limits.get("max_sheets", 10000)
         hojas_procesadas = 0
 
-        # ── Paso A: Inicio de hoja ──────────────────────────────────────
+        # ── Paso A: Inicio de hoja ──────────────────────────────────────────
         while self._running and hojas_procesadas < max_hojas:
             self._check_pause()
             if not self._running:
@@ -637,20 +556,19 @@ class AutopilotRunner:
             hojas_procesadas += 1
             self._log(f"── Procesando hoja {hojas_procesadas} ──", "INFO")
 
-            # Extraer preguntas de esta hoja (iteramos pregunta a pregunta)
             pregunta_actual_idx = 0
-            max_preguntas_hoja = 200   # salvaguarda
+            max_preguntas_hoja = 200
 
             while self._running and pregunta_actual_idx < max_preguntas_hoja:
                 self._check_pause()
                 if not self._running:
                     break
 
-                # Obtener la pregunta actual (sin responder)
+                # Obtener la primera pregunta sin responder
                 pagina_data = self.extraer_preguntas_y_opciones()
 
                 if not pagina_data:
-                    # Ninguna pregunta sin responder → fin de hoja
+                    # Todas respondidas → fin de hoja
                     self._log(
                         f"Hoja {hojas_procesadas} completada "
                         f"({pregunta_actual_idx} preguntas respondidas).",
@@ -678,140 +596,29 @@ class AutopilotRunner:
                     "INFO",
                 )
 
-                # ── Paso B: Consultar DB o probar al azar ──────────────
+                # ── Paso B: Consultar DB o probar al azar ──────────────────
                 hash_p = self.db.calcular_hash(texto_pregunta)
                 respuesta_db = self.db.consultar_db(hash_p)
 
                 if respuesta_db is not None:
-                    # Responder desde DB
-                    self._log(
-                        f"  [DB] Respondiendo desde BD: '{respuesta_db}'", "SUCCESS"
-                    )
-                    # Buscar el índice en las opciones actuales por texto
-                    opcion_encontrada = next(
-                        (o for o in opciones if o["texto"].strip() == respuesta_db.strip()),
-                        None,
-                    )
-                    if opcion_encontrada:
-                        self.hacer_clic_en_opcion(
-                            opcion_encontrada["selector"],
-                            opcion_encontrada.get("clickSelector"),
-                        )
-                        self.stats["respondidas_desde_db"] += 1
-                    else:
-                        # Texto no coincide exactamente; intentar búsqueda difusa
-                        self._log(
-                            f"  [DB] Texto exacto no encontrado. Buscando similitud...",
-                            "WARNING",
-                        )
-                        mejor = max(
-                            opciones,
-                            key=lambda o: _similarity(o["texto"], respuesta_db),
-                        )
-                        self._log(
-                            f"  [DB] Mejor coincidencia: '{mejor['texto']}'", "INFO"
-                        )
-                        self.hacer_clic_en_opcion(
-                            mejor["selector"], mejor.get("clickSelector")
-                        )
-                        self.stats["respondidas_desde_db"] += 1
-
+                    self._responder_desde_db(respuesta_db, opciones, texto_pregunta)
                     pregunta_actual_idx += 1
                     self._emit_stats()
                     time.sleep(self.timings["dom_stable_wait_ms"] / 1000)
                     continue
 
-                # No está en DB → probar al azar (con descarte)
-                self._log(
-                    f"  [AZAR] Pregunta desconocida. Iniciando búsqueda aleatoria...",
-                    "WARNING",
-                )
-                descartadas: set[str] = set()   # textos de opciones descartadas
-                max_intentos = min(
-                    self.limits.get("max_intentos_por_pregunta", 8),
-                    len(opciones),
-                )
-                acertada = False
-
-                for intento in range(max_intentos):
-                    if not self._running:
-                        break
-                    self._check_pause()
-
-                    # Opciones disponibles (no descartadas)
-                    disponibles = [o for o in opciones if o["texto"] not in descartadas]
-                    if not disponibles:
-                        self._log(
-                            f"  [AZAR] Sin opciones disponibles tras {intento} intentos.", "ERROR"
-                        )
-                        break
-
-                    elegida = random.choice(disponibles)
-                    self._log(
-                        f"  [AZAR] Intento {intento + 1}/{max_intentos}: '{elegida['texto']}'",
-                        "INFO",
-                    )
-
-                    clic_ok = self.hacer_clic_en_opcion(
-                        elegida["selector"], elegida.get("clickSelector")
-                    )
-                    if not clic_ok:
-                        self._log("  [AZAR] Clic fallido. Descartando opción.", "WARNING")
-                        descartadas.add(elegida["texto"])
-                        continue
-
-                    # Validar resultado
-                    resultado = self.validar_acierto(elegida["selector"])
-                    self._log(f"  [AZAR] Feedback DOM: {resultado}", "INFO")
-
-                    if resultado == "correct":
-                        self._log(
-                            f"  [AZAR] ¡CORRECTO! Guardando en BD: '{elegida['texto']}'",
-                            "SUCCESS",
-                        )
-                        self.db.guardar_en_db(hash_p, texto_pregunta, elegida["texto"])
-                        self.stats["respondidas_al_azar"] += 1
-                        self.stats["nuevas_guardadas"] += 1
-                        acertada = True
-                        pregunta_actual_idx += 1
-                        self._emit_stats()
-                        break
-
-                    elif resultado == "incorrect":
-                        self._log(
-                            f"  [AZAR] Incorrecto. Descartando '{elegida['texto']}' y recargando hoja.",
-                            "WARNING",
-                        )
-                        descartadas.add(elegida["texto"])
-                        self.recargar_hoja_actual()
-
-                        # Re-extraer opciones tras recarga (el DOM se destruyó)
-                        nuevas_pagina = self.extraer_preguntas_y_opciones()
-                        if nuevas_pagina:
-                            opciones = nuevas_pagina[0].get("options", opciones)
-
-                    else:
-                        # "unknown" → asumir que es la última pregunta de la hoja
-                        # o que la plataforma no da feedback inmediato.
-                        # Avanzar pregunta de todas formas para no quedarse bloqueado.
-                        self._log(
-                            "  [AZAR] Feedback desconocido. Asumiendo avance de pregunta.",
-                            "WARNING",
-                        )
-                        pregunta_actual_idx += 1
-                        acertada = True   # evita log de error
-                        break
-
+                # No está en DB → probar al azar con descarte
+                acertada = self._buscar_al_azar(hash_p, texto_pregunta, opciones)
                 if not acertada and self._running:
                     self._log(
-                        f"  [ERROR] No se pudo acertar la pregunta tras {max_intentos} intentos. "
-                        "Posible cambio en la interfaz. Continuando...",
+                        f"  [ERROR] No se pudo acertar la pregunta tras "
+                        f"{self.limits.get('max_intentos_por_pregunta', 8)} intentos. Continuando...",
                         "ERROR",
                     )
                     self.failed_questions_in_sheet.add(texto_pregunta)
-                    pregunta_actual_idx += 1  # forzar avance para no bloquearse
+                pregunta_actual_idx += 1
 
-            # ── Paso C: Avanzar hoja ────────────────────────────────────
+            # ── Paso C: Avanzar hoja ────────────────────────────────────────
             if not self._running:
                 break
 
@@ -832,21 +639,190 @@ class AutopilotRunner:
         self._shutdown()
 
     # ------------------------------------------------------------------
+    # Lógica de respuesta desde BD
+    # ------------------------------------------------------------------
+
+    def _responder_desde_db(
+        self,
+        respuesta_db: dict,
+        opciones: list[dict],
+        texto_pregunta: str,
+    ) -> None:
+        texto_correcto = respuesta_db.get("texto", "")
+        selector_correcto = respuesta_db.get("selector", "")
+
+        self._log(f"  [DB] Respondiendo desde BD: '{texto_correcto}'", "SUCCESS")
+
+        # 1. Intentar por data-op (selector más estable)
+        if selector_correcto:
+            opcion_por_selector = next(
+                (o for o in opciones if o.get("data_op") == selector_correcto),
+                None,
+            )
+            if opcion_por_selector:
+                self.hacer_clic_en_opcion(
+                    opcion_por_selector["selector"],
+                    opcion_por_selector.get("clickSelector"),
+                )
+                self.stats["respondidas_desde_db"] += 1
+                return
+
+        # 2. Intentar por texto exacto
+        opcion_por_texto = next(
+            (o for o in opciones if o["texto"].strip() == texto_correcto.strip()),
+            None,
+        )
+        if opcion_por_texto:
+            self.hacer_clic_en_opcion(
+                opcion_por_texto["selector"],
+                opcion_por_texto.get("clickSelector"),
+            )
+            self.stats["respondidas_desde_db"] += 1
+            return
+
+        # 3. Búsqueda por similitud (fallback)
+        self._log("  [DB] Texto exacto no encontrado. Buscando similitud...", "WARNING")
+        mejor = max(opciones, key=lambda o: _similarity(o["texto"], texto_correcto))
+        self._log(f"  [DB] Mejor coincidencia: '{mejor['texto']}'", "INFO")
+        self.hacer_clic_en_opcion(mejor["selector"], mejor.get("clickSelector"))
+        self.stats["respondidas_desde_db"] += 1
+
+    # ------------------------------------------------------------------
+    # Lógica de búsqueda aleatoria con descarte
+    # ------------------------------------------------------------------
+
+    def _buscar_al_azar(
+        self,
+        hash_p: str,
+        texto_pregunta: str,
+        opciones: list[dict],
+    ) -> bool:
+        """
+        Prueba opciones al azar, descartando las incorrectas.
+        Guarda la correcta en la BD con su data-op.
+        Retorna True si encontró la respuesta correcta.
+        """
+        self._log("  [AZAR] Pregunta desconocida. Iniciando búsqueda aleatoria...", "WARNING")
+
+        # Descarte por data-op si disponible, sino por texto
+        descartadas_ops: set[str] = set()    # data-op descartados
+        descartadas_txt: set[str] = set()    # textos descartados (cuando no hay data-op)
+
+        max_intentos = min(
+            self.limits.get("max_intentos_por_pregunta", 8),
+            len(opciones),
+        )
+        acertada = False
+
+        for intento in range(max_intentos):
+            if not self._running:
+                break
+            self._check_pause()
+
+            # Filtrar opciones disponibles
+            disponibles = [
+                o for o in opciones
+                if (o.get("data_op") not in descartadas_ops if o.get("data_op") else True)
+                and o["texto"] not in descartadas_txt
+            ]
+            if not disponibles:
+                self._log(
+                    f"  [AZAR] Sin opciones disponibles tras {intento} intentos.", "ERROR"
+                )
+                break
+
+            elegida = random.choice(disponibles)
+            self._log(
+                f"  [AZAR] Intento {intento + 1}/{max_intentos}: '{elegida['texto']}'",
+                "INFO",
+            )
+
+            clic_ok = self.hacer_clic_en_opcion(
+                elegida["selector"], elegida.get("clickSelector")
+            )
+            if not clic_ok:
+                self._log("  [AZAR] Clic fallido. Descartando opción.", "WARNING")
+                if elegida.get("data_op"):
+                    descartadas_ops.add(elegida["data_op"])
+                descartadas_txt.add(elegida["texto"])
+                continue
+
+            resultado = self.validar_acierto(elegida["selector"])
+            self._log(f"  [AZAR] Feedback DOM: {resultado}", "INFO")
+
+            if resultado == "correct":
+                selector_a_guardar = elegida.get("data_op") or elegida["selector"]
+                self._log(
+                    f"  [AZAR] ¡CORRECTO! Guardando en BD: '{elegida['texto']}' "
+                    f"[op={selector_a_guardar[:30]}...]",
+                    "SUCCESS",
+                )
+                self.db.guardar_en_db(
+                    hash_p,
+                    texto_pregunta,
+                    elegida["texto"],
+                    selector_correcto=selector_a_guardar,
+                    inmediato=True,
+                )
+                self.stats["respondidas_al_azar"] += 1
+                self.stats["nuevas_guardadas"] += 1
+                self._emit_stats()
+                acertada = True
+                break
+
+            elif resultado == "incorrect":
+                self._log(
+                    f"  [AZAR] Incorrecto. Descartando '{elegida['texto']}' y recargando hoja.",
+                    "WARNING",
+                )
+                if elegida.get("data_op"):
+                    descartadas_ops.add(elegida["data_op"])
+                descartadas_txt.add(elegida["texto"])
+                self.recargar_hoja_actual()
+
+                # Re-extraer opciones tras recarga
+                nuevas_pagina = self.extraer_preguntas_y_opciones()
+                if nuevas_pagina:
+                    nuevas_opciones = nuevas_pagina[0].get("options", opciones)
+                    # Mantener descarte: actualizar lista
+                    opciones = [
+                        o for o in nuevas_opciones
+                        if o["texto"] not in descartadas_txt
+                        and (not o.get("data_op") or o.get("data_op") not in descartadas_ops)
+                    ] + [
+                        o for o in nuevas_opciones
+                        if o["texto"] in descartadas_txt
+                        or (o.get("data_op") and o.get("data_op") in descartadas_ops)
+                    ]
+                    # Dejamos opciones en orden completo pero el filtro está en disponibles
+                    opciones = nuevas_opciones
+
+            else:
+                # "unknown" → asumir avance de pregunta para no bloquearse
+                self._log(
+                    "  [AZAR] Feedback desconocido. Asumiendo avance de pregunta.",
+                    "WARNING",
+                )
+                acertada = True
+                break
+
+        return acertada
+
+    # ------------------------------------------------------------------
     # Cierre
     # ------------------------------------------------------------------
 
     def _shutdown(self) -> None:
         """Cierra BD y navegador de forma limpia."""
         self._running = False
-        # Flush pendientes en BD
         flushed = self.db.flush_buffer()
         if flushed:
             self._log(f"Buffer final: {flushed} registros escritos en BD.", "INFO")
         self.db.close()
 
-        if self.browser:
+        if self.browser and self._owned_browser:
             if self.keep_browser_open or self.ap_cfg.get("browser", {}).get("keep_open", False):
-                self._log("Manteniendo navegador abierto según configuración de Autopilot.", "INFO")
+                self._log("Manteniendo navegador abierto según configuración.", "INFO")
             else:
                 self._log("Cerrando navegador Playwright...", "INFO")
                 try:
@@ -857,7 +833,7 @@ class AutopilotRunner:
 
 
 # ---------------------------------------------------------------------------
-# Utilidad de similitud (adaptada de core/actions.py)
+# Utilidad de similitud
 # ---------------------------------------------------------------------------
 
 def _similarity(a: str, b: str) -> float:
@@ -873,7 +849,7 @@ def _similarity(a: str, b: str) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Thread Qt — compatible con el widget existente
+# Thread Qt — compatible con el widget existente (opcional)
 # ---------------------------------------------------------------------------
 
 try:
@@ -886,12 +862,11 @@ if _HAS_PYQT:
     class AutopilotRunnerThread(QThread):
         """
         Thread Qt que envuelve AutopilotRunner y emite señales compatibles
-        con las del widget existente (log_signal, status_signal) más una
-        nueva señal de estadísticas de BD.
+        con las del widget existente.
         """
-        log_signal    = pyqtSignal(str, str)   # (mensaje, nivel)
-        status_signal = pyqtSignal(str)         # "running" | "paused" | "idle"
-        db_stats_signal = pyqtSignal(dict)      # estadísticas de BD en tiempo real
+        log_signal    = pyqtSignal(str, str)
+        status_signal = pyqtSignal(str)
+        db_stats_signal = pyqtSignal(dict)
 
         def __init__(
             self,

@@ -32,6 +32,11 @@ class BotConfig(BaseModel):
     vision_enabled: bool = Field(default=True)
     log_reasoning: bool = Field(default=False)
 
+    # Manual authentication wait (Playwright mode)
+    wait_for_manual_auth: bool = Field(default=True)
+    manual_auth_timeout_sec: int = Field(default=300, ge=0)
+    manual_auth_poll_sec: float = Field(default=1.0, ge=0.1, le=60.0)
+
     # OCR (vision mode)
     lang: str = Field(default="spa+eng", min_length=1, max_length=80)
     psm: int = Field(default=6, ge=0, le=13)
@@ -53,7 +58,7 @@ class BotConfig(BaseModel):
     next_wait_sec: float = Field(default=2.0, ge=0.0, le=60.0)
 
     # Playwright settings
-    pw_timeout_ms: int = Field(default=30000, ge=0)
+    pw_timeout_ms: int = Field(default=60000, ge=0)
     pw_headless: bool = False           # False = browser visible
 
     # Tesseract path (vision mode)
@@ -143,6 +148,9 @@ class BotConfigUpdate(BaseModel):
     max_think_ms: Optional[int] = Field(default=None, ge=0)
     vision_enabled: Optional[bool] = None
     log_reasoning: Optional[bool] = None
+    wait_for_manual_auth: Optional[bool] = None
+    manual_auth_timeout_sec: Optional[int] = Field(default=None, ge=0)
+    manual_auth_poll_sec: Optional[float] = Field(default=None, ge=0.1, le=60.0)
     lang: Optional[str] = Field(default=None, min_length=1, max_length=80)
     psm: Optional[int] = Field(default=None, ge=0, le=13)
     region: Optional[tuple[int, int, int, int]] = None

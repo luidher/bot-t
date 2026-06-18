@@ -94,6 +94,48 @@ class BotRunner:
         cfg = BotConfig.model_validate(self.config)
         return DecisionPipeline(cfg)
 
+    def _wait_for_manual_auth_and_questions(self) -> bool:
+        if not self.config.get("wait_for_manual_auth", True):
+            return True
+
+        if not self.browser or not self.browser.page:
+            return False
+
+        timeout_sec = int(self.config.get("manual_auth_timeout_sec", 300))
+        poll_sec = float(self.config.get("manual_auth_poll_sec", 1.0))
+        poll_sec = max(poll_sec, 0.2)
+
+        start_at = time.monotonic()
+        notified_wait = False
+
+        while self.browser and self.browser.page:
+            if self.paused:
+                time.sleep(0.2)
+                continue
+
+            page_data = self.browser.read_page()
+            if page_data and page_data.get("question") and page_data.get("options"):
+                self.log("Pregunta detectada después de la autenticación. Continuando ejecución.", "SUCCESS")
+                return True
+
+            if not notified_wait:
+                self.log(
+                    "Navegador abierto. Autentícate manualmente y espera a que aparezca el formulario.",
+                    "INFO",
+                )
+                notified_wait = True
+
+            if timeout_sec > 0 and time.monotonic() - start_at >= timeout_sec:
+                self.log(
+                    f"No se detectaron preguntas tras {timeout_sec} segundos de espera manual.",
+                    "ERROR",
+                )
+                return False
+
+            time.sleep(poll_sec)
+
+        return False
+
     def _pipeline_model_used(self, qwen_activated: bool) -> str:
         reason_model = self.config.get("reason_model", "deepseek-r1:8b")
         if qwen_activated:
@@ -239,8 +281,13 @@ class BotRunner:
         if not self.browser:
             self.log("Abriendo navegador con Playwright...", "INFO")
             self.browser = BotBrowser(headless=self.config.get("pw_headless", False))
-            self.browser.open(url, timeout_ms=self.config.get("pw_timeout_ms", 10000))
+            self.browser.open(url, timeout_ms=self.config.get("pw_timeout_ms", 60000))
             self.log(f"Navegando a {url}...", "INFO")
+
+            if self.config.get("wait_for_manual_auth", True):
+                if not self._wait_for_manual_auth_and_questions():
+                    self.log("No hubo autenticación/manual input suficiente. Abortando ejecución.", "ERROR")
+                    raise RuntimeError("Timeout esperando autenticación manual o formulario.")
 
         self.log("Buscando preguntas sin responder en el DOM...", "INFO")
         page_data = self.browser.read_page()
