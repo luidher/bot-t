@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import time
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
@@ -235,8 +237,11 @@ _JS_EXTRACT_ALL = r"""
 # Valida si una pregunta (por su data-item del li contenedor) fue correcta o incorrecta
 # después de hacer clic en "Calificar"
 _JS_VALIDATE_QUESTION = r"""
-(dataItem) => {
+(payload) => {
     try {
+        const dataItem = (payload && payload.data_item) || '';
+        const selector = (payload && payload.selector) || '';
+        const dataOp = (payload && payload.data_op) || '';
         // Buscar el li contenedor por data-item
         let container = null;
         if (dataItem) {
@@ -244,20 +249,51 @@ _JS_VALIDATE_QUESTION = r"""
         }
         if (!container) return 'unknown';
 
-        const correctKeywords   = ['correct', 'success', 'right', 'acert', 'verdad', 'correcto', 'bien'];
-        const incorrectKeywords = ['incorrect', 'wrong', 'error', 'fail', 'incorrecto', 'erroneo', 'mal'];
+        const correctKeywords = [
+            'correct', 'success', 'right', 'ok', 'good', 'acert', 'verdad',
+            'correcto', 'bien', 'aprob', 'valid', 'check', 'fa-check'
+        ];
+        const incorrectKeywords = [
+            'incorrect', 'wrong', 'error', 'fail', 'bad', 'ko', 'danger',
+            'incorrecto', 'erroneo', 'mal', 'inval', 'times', 'close',
+            'fa-times', 'fa-close', 'xmark'
+        ];
 
         const checkEl = (node) => {
-            const cls = (node.className || '').toLowerCase();
-            const html = node.outerHTML.toLowerCase().substring(0, 800);
-            if (incorrectKeywords.some(k => cls.includes(k) || html.includes(k))) return 'incorrect';
-            if (correctKeywords.some(k => cls.includes(k) || html.includes(k))) return 'correct';
+            if (!node || node.nodeType !== Node.ELEMENT_NODE) return null;
+            const cls = (node.className || '').toString().toLowerCase();
+            const aria = (node.getAttribute('aria-label') || '').toLowerCase();
+            const title = (node.getAttribute('title') || '').toLowerCase();
+            const dataAttrs = Array.from(node.attributes || [])
+                .filter(a => a.name.startsWith('data-'))
+                .map(a => `${a.name}=${a.value}`)
+                .join(' ')
+                .toLowerCase();
+            const style = window.getComputedStyle(node);
+            const inlineStyle = (node.getAttribute('style') || '').toLowerCase();
+            const hay = `${cls} ${aria} ${title} ${dataAttrs} ${inlineStyle}`;
+
+            if (incorrectKeywords.some(k => hay.includes(k))) return 'incorrect';
+            if (correctKeywords.some(k => hay.includes(k))) return 'correct';
+
+            const colorBits = `${style.color} ${style.backgroundColor} ${style.borderColor}`.toLowerCase();
+            if (colorBits.includes('255, 0, 0') || colorBits.includes('220, 53, 69') || colorBits.includes('dc3545')) return 'incorrect';
+            if (colorBits.includes('0, 128, 0') || colorBits.includes('40, 167, 69') || colorBits.includes('28a745')) return 'correct';
             return null;
         };
 
         // Primero validar la opción marcada; evita que la respuesta correcta
         // mostrada en otra opción oculte que la elegida fue incorrecta.
-        const checkedInput = container.querySelector('input:checked');
+        let checkedInput = container.querySelector('input:checked');
+        if (!checkedInput && dataOp) {
+            checkedInput = container.querySelector(`input[data-op="${CSS.escape(dataOp)}"]`);
+        }
+        if (!checkedInput && selector) {
+            try {
+                const candidate = document.querySelector(selector);
+                if (candidate && container.contains(candidate)) checkedInput = candidate;
+            } catch (_) {}
+        }
         if (checkedInput) {
             let inp = checkedInput;
             for (let i = 0; i < 5; i++) {
@@ -275,6 +311,14 @@ _JS_VALIDATE_QUESTION = r"""
             if (r) return r;
             if (!node.parentElement || node === document.body) break;
             node = node.parentElement;
+        }
+
+        const feedbackNodes = Array.from(container.querySelectorAll(
+            '.feedback, .message, .mensaje, .alert, .resultado, .result, .validation, .validacion, i, svg, span'
+        ));
+        for (const fb of feedbackNodes) {
+            const r = checkEl(fb);
+            if (r) return r;
         }
 
         return 'unknown';
@@ -333,6 +377,150 @@ _JS_CLICK_BY_TEXT = r"""
     return false;
 }
 """
+
+_JS_FEEDBACK_SNAPSHOT = r"""
+(payload) => {
+    try {
+        const dataItem = (payload && payload.data_item) || '';
+        const dataOp = (payload && payload.data_op) || '';
+        const selector = (payload && payload.selector) || '';
+        let container = dataItem ? document.querySelector(`li[data-item="${dataItem}"]`) : null;
+        if (!container) return null;
+
+        let input = container.querySelector('input:checked');
+        if (!input && dataOp) input = container.querySelector(`input[data-op="${CSS.escape(dataOp)}"]`);
+        if (!input && selector) {
+            try {
+                const candidate = document.querySelector(selector);
+                if (candidate && container.contains(candidate)) input = candidate;
+            } catch (_) {}
+        }
+
+        const summarize = (node) => {
+            if (!node || node.nodeType !== Node.ELEMENT_NODE) return null;
+            const style = window.getComputedStyle(node);
+            return {
+                tag: node.tagName.toLowerCase(),
+                className: (node.className || '').toString(),
+                dataResult: node.getAttribute('data-result') || node.getAttribute('data-status') || '',
+                style: node.getAttribute('style') || '',
+                color: style.color,
+                backgroundColor: style.backgroundColor,
+                text: (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 180),
+            };
+        };
+
+        const path = [];
+        let node = input || container;
+        for (let i = 0; node && i < 5; i++) {
+            path.push(summarize(node));
+            if (node === container) break;
+            node = node.parentElement;
+        }
+
+        return {
+            container: summarize(container),
+            selectedPath: path.filter(Boolean),
+        };
+    } catch (_) {
+        return null;
+    }
+}
+"""
+
+_PY_CORRECT_WORDS = (
+    "correct", "success", "right", "ok", "good", "acert", "verdad",
+    "correcto", "correcta", "bien", "aprob", "valid", "check",
+)
+_PY_INCORRECT_WORDS = (
+    "incorrect", "wrong", "error", "fail", "bad", "ko", "danger",
+    "incorrecto", "incorrecta", "erroneo", "erronea", "mal", "inval",
+    "times", "close", "xmark",
+)
+_PY_CORRECT_KEYS = (
+    "correct", "correcta", "correcto", "answer", "respuesta", "acierto",
+    "success", "valid", "right",
+)
+_PY_INCORRECT_KEYS = (
+    "incorrect", "incorrecta", "incorrecto", "wrong", "error", "fail",
+    "invalid", "errone", "mal",
+)
+
+
+def _normalize_feedback_text(value: Any) -> str:
+    text = "" if value is None else str(value)
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", text.lower()).strip()
+
+
+def _compact_json_text(value: Any, limit: int = 12000) -> str:
+    try:
+        return _normalize_feedback_text(json.dumps(value, ensure_ascii=False, default=str))[:limit]
+    except Exception:
+        return _normalize_feedback_text(value)[:limit]
+
+
+def _classify_feedback_words(text: str) -> str:
+    norm = _normalize_feedback_text(text)
+    if any(word in norm for word in _PY_INCORRECT_WORDS):
+        return "incorrect"
+    if any(word in norm for word in _PY_CORRECT_WORDS):
+        return "correct"
+    return "unknown"
+
+
+def _has_selected_value(value_text: str, data_op: str, option_text: str) -> bool:
+    data_op_norm = _normalize_feedback_text(data_op)
+    option_norm = _normalize_feedback_text(option_text)
+    return bool(
+        (data_op_norm and data_op_norm in value_text)
+        or (option_norm and len(option_norm) >= 3 and option_norm in value_text)
+    )
+
+
+def _classify_feedback_json(node: Any, data_item: str, data_op: str, option_text: str) -> str:
+    """Clasifica respuestas JSON comunes sin asumir un esquema exacto."""
+    data_item_norm = _normalize_feedback_text(data_item)
+
+    if isinstance(node, dict):
+        node_text = _compact_json_text(node)
+        node_has_question = not data_item_norm or data_item_norm in node_text
+        node_has_selected = _has_selected_value(node_text, data_op, option_text)
+
+        for key, value in node.items():
+            key_norm = _normalize_feedback_text(key)
+            value_text = _compact_json_text(value)
+            value_has_selected = _has_selected_value(value_text, data_op, option_text)
+
+            if any(marker in key_norm for marker in _PY_INCORRECT_KEYS):
+                if value is True and node_has_selected and node_has_question:
+                    return "incorrect"
+                if value_has_selected and node_has_question:
+                    return "incorrect"
+
+            if any(marker in key_norm for marker in _PY_CORRECT_KEYS):
+                if value is True and node_has_selected and node_has_question:
+                    return "correct"
+                if value is False and node_has_selected and node_has_question:
+                    return "incorrect"
+                if value_has_selected and node_has_question:
+                    return "correct"
+
+            result = _classify_feedback_json(value, data_item, data_op, option_text)
+            if result != "unknown":
+                return result
+
+        if node_has_question and node_has_selected:
+            return _classify_feedback_words(node_text)
+
+    elif isinstance(node, list):
+        for item in node:
+            result = _classify_feedback_json(item, data_item, data_op, option_text)
+            if result != "unknown":
+                return result
+
+    return "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +582,7 @@ class AutopilotRunner:
 
         self._running = False
         self._paused = False
+        self._last_submit_payloads: list[dict[str, str]] = []
 
     # ------------------------------------------------------------------
     # Control externo
@@ -562,18 +751,86 @@ class AutopilotRunner:
     # Botones de submit / reload / siguiente
     # ------------------------------------------------------------------
 
+    def _start_submit_response_capture(self) -> Callable[[Any], None] | None:
+        """Registra respuestas de red recientes para leer feedback AJAX/HTML."""
+        if not self.browser or not self.browser.page:
+            return None
+
+        self._last_submit_payloads = []
+        responses: list[Any] = []
+
+        def _handler(response: Any) -> None:
+            try:
+                resource_type = getattr(response.request, "resource_type", "")
+                if resource_type not in {"xhr", "fetch", "document"}:
+                    return
+                responses.append(response)
+            except Exception:
+                return
+
+        self._pending_submit_responses = responses
+        try:
+            self.browser.page.on("response", _handler)
+            return _handler
+        except Exception:
+            return None
+
+    def _finish_submit_response_capture(self, handler: Callable[[Any], None] | None) -> None:
+        if not self.browser or not self.browser.page:
+            return
+
+        if handler:
+            try:
+                self.browser.page.remove_listener("response", handler)
+            except Exception:
+                try:
+                    self.browser.page.off("response", handler)
+                except Exception:
+                    pass
+
+        payloads: list[dict[str, str]] = []
+        responses = getattr(self, "_pending_submit_responses", [])
+        for response in list(responses)[-20:]:
+            try:
+                headers = getattr(response, "headers", {}) or {}
+                content_type = headers.get("content-type", "").lower()
+                if not any(part in content_type for part in ("json", "text", "html", "javascript")):
+                    continue
+                text = response.text()
+                if not text:
+                    continue
+                payloads.append({
+                    "url": getattr(response, "url", ""),
+                    "content_type": content_type,
+                    "text": text[:200000],
+                })
+            except Exception:
+                continue
+
+        self._last_submit_payloads = payloads
+        self._pending_submit_responses = []
+        if payloads:
+            self._log(f"Capturadas {len(payloads)} respuesta(s) del servidor tras 'Calificar'.", "DEBUG")
+
     def _presionar_calificar(self) -> bool:
         """Hace clic en el botón 'Calificar' (btn-submit) para enviar la hoja."""
         submit_selectors = self.ap_cfg["selectors"]["submit_button"]
         found = self._find_and_mark_button(submit_selectors)
         if found:
             self._log("Botón 'Calificar' encontrado. Haciendo clic...", "INFO")
+            response_handler = self._start_submit_response_capture()
             ok = self._click_selector_with_fallback(found)
             if ok:
                 wait_ms = self.timings.get("after_submit_wait_ms", 2000)
                 self._log(f"'Calificar' presionado. Esperando {wait_ms}ms para feedback...", "INFO")
                 time.sleep(wait_ms / 1000)
+                try:
+                    self.browser.page.wait_for_load_state("networkidle", timeout=3000)
+                except Exception:
+                    pass
+                self._finish_submit_response_capture(response_handler)
                 return True
+            self._finish_submit_response_capture(response_handler)
         self._log("No se encontró botón 'Calificar'. ¿Ya fue presionado o no está visible?", "WARNING")
         return False
 
@@ -594,6 +851,17 @@ class AutopilotRunner:
                     self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
                 except Exception:
                     pass
+                return True
+
+        for text_hint in ["Intenta de nuevo", "Reintentar", "Intentar de nuevo", "Try again"]:
+            if self._click_by_visible_text(text_hint):
+                wait_ms = self.timings.get("reload_wait_ms", 2500)
+                time.sleep(wait_ms / 1000)
+                try:
+                    self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                except Exception:
+                    pass
+                self._log(f"Reintentando con botón '{text_hint}'.", "INFO")
                 return True
 
         # Fallback: page.reload()
