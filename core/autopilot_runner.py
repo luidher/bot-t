@@ -201,7 +201,15 @@ _JS_EXTRACT_ALL = r"""
                 optionElement = input.parentElement || input;
             }
 
-            if (!labelText) continue;
+            labelText = (labelText || '').replace(/\s+/g, ' ').trim();
+            if (!labelText) {
+                const optionRoot = optionElement || input.parentElement || input;
+                const media = optionRoot.querySelector && optionRoot.querySelector('img, svg, canvas');
+                const mediaLabel = media
+                    ? (media.getAttribute('alt') || media.getAttribute('title') || media.getAttribute('aria-label') || '')
+                    : '';
+                labelText = (mediaLabel || `Opción ${options.length + 1}`).replace(/\s+/g, ' ').trim();
+            }
 
             options.push({
                 texto: labelText,
@@ -242,21 +250,13 @@ _JS_VALIDATE_QUESTION = r"""
         const checkEl = (node) => {
             const cls = (node.className || '').toLowerCase();
             const html = node.outerHTML.toLowerCase().substring(0, 800);
-            if (correctKeywords.some(k => cls.includes(k) || html.includes(k))) return 'correct';
             if (incorrectKeywords.some(k => cls.includes(k) || html.includes(k))) return 'incorrect';
+            if (correctKeywords.some(k => cls.includes(k) || html.includes(k))) return 'correct';
             return null;
         };
 
-        // Verificar el propio contenedor y sus hijos hasta 3 niveles
-        let node = container;
-        for (let i = 0; i < 4; i++) {
-            const r = checkEl(node);
-            if (r) return r;
-            if (!node.parentElement || node === document.body) break;
-            node = node.parentElement;
-        }
-
-        // Verificar inputs checked del contenedor
+        // Primero validar la opción marcada; evita que la respuesta correcta
+        // mostrada en otra opción oculte que la elegida fue incorrecta.
         const checkedInput = container.querySelector('input:checked');
         if (checkedInput) {
             let inp = checkedInput;
@@ -266,6 +266,15 @@ _JS_VALIDATE_QUESTION = r"""
                 if (!inp.parentElement || inp === container) break;
                 inp = inp.parentElement;
             }
+        }
+
+        // Después revisar el contenedor de la pregunta.
+        let node = container;
+        for (let i = 0; i < 4; i++) {
+            const r = checkEl(node);
+            if (r) return r;
+            if (!node.parentElement || node === document.body) break;
+            node = node.parentElement;
         }
 
         return 'unknown';
@@ -297,6 +306,31 @@ _JS_FIND_BUTTON = r"""
         } catch (_) {}
     }
     return null;
+}
+"""
+
+_JS_CLICK_BY_TEXT = r"""
+(textHint) => {
+    const wanted = (textHint || '').toLowerCase().trim();
+    if (!wanted) return false;
+    const isVisible = (el) => {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    };
+    const candidates = Array.from(document.querySelectorAll(
+        'button, a, input[type="submit"], input[type="button"]'
+    ));
+    for (const el of candidates) {
+        if (!isVisible(el)) continue;
+        const text = ((el.innerText || el.textContent || el.value || '') + '').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (!text.includes(wanted)) continue;
+        el.click();
+        return true;
+    }
+    return false;
 }
 """
 
@@ -473,6 +507,8 @@ class AutopilotRunner:
     def _js_click_selector(self, selector: str) -> bool:
         if not self.browser or not self.browser.page:
             return False
+        if ":has-text(" in selector:
+            return False
         try:
             clicked = self.browser.page.evaluate(
                 r"""(sel) => {
@@ -500,6 +536,18 @@ class AutopilotRunner:
             except Exception:
                 continue
         return self._js_click_selector(selector)
+
+    def _click_by_visible_text(self, text_hint: str) -> bool:
+        if not text_hint or not self.browser or not self.browser.page:
+            return False
+        try:
+            clicked = self.browser.page.evaluate(_JS_CLICK_BY_TEXT, text_hint)
+            if clicked:
+                time.sleep(self.timings.get("after_click_wait_ms", 600) / 1000)
+            return bool(clicked)
+        except Exception as exc:
+            self._log(f"Error JS click por texto '{text_hint}': {exc}", "DEBUG")
+            return False
 
     def _hacer_clic_en_opcion(self, selector: str, click_selector: str | None = None) -> bool:
         target = click_selector or selector
@@ -578,19 +626,15 @@ class AutopilotRunner:
                 return True
 
         for text_hint in ["Siguiente", "Next", "Continuar", "Submit", "Enviar"]:
-            try:
-                sel = f"button:has-text('{text_hint}'), a:has-text('{text_hint}')"
-                if self._click_selector_with_fallback(sel):
-                    wait_ms = self.timings.get("next_wait_ms", 3000)
-                    time.sleep(wait_ms / 1000)
-                    try:
-                        self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
-                    except Exception:
-                        pass
-                    self._log(f"Avanzado con botón '{text_hint}'.", "SUCCESS")
-                    return True
-            except Exception:
-                continue
+            if self._click_by_visible_text(text_hint):
+                wait_ms = self.timings.get("next_wait_ms", 3000)
+                time.sleep(wait_ms / 1000)
+                try:
+                    self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                except Exception:
+                    pass
+                self._log(f"Avanzado con botón '{text_hint}'.", "SUCCESS")
+                return True
 
         self._log("No se encontró botón 'Siguiente'. ¿Fin del formulario?", "WARNING")
         return False
@@ -743,6 +787,8 @@ class AutopilotRunner:
             opciones_descartadas: dict[str, dict[str, set]] = {}
             # Preguntas confirmadas correctas en esta hoja (por hash)
             confirmadas_correctas: set[str] = set()
+            hoja_completada = False
+            hoja_sin_preguntas = False
 
             for ronda in range(max_rondas):
                 self._check_pause()
@@ -759,6 +805,7 @@ class AutopilotRunner:
                         "Intentando avanzar...",
                         "WARNING",
                     )
+                    hoja_sin_preguntas = True
                     break
 
                 self._log(
@@ -770,10 +817,12 @@ class AutopilotRunner:
                 preguntas_a_responder = [
                     p for p in preguntas
                     if self.db.calcular_hash(p["question"]) not in confirmadas_correctas
+                    or not p.get("answered")
                 ]
 
                 if not preguntas_a_responder:
                     self._log("Todas las preguntas de la hoja ya están confirmadas como correctas.", "SUCCESS")
+                    hoja_completada = True
                     break
 
                 elegidas: dict[str, dict] = {}  # hash_p → opción elegida
@@ -866,13 +915,12 @@ class AutopilotRunner:
                         self.stats["respondidas_al_azar"] += 1
 
                     else:
-                        # unknown: asumir correcto para no bloquearse indefinidamente
                         self._log(
                             f"  ? Feedback desconocido para '{pregunta_obj['question'][:40]}...'. "
-                            "Asumiendo correcto.",
+                            "se mantendrá pendiente.",
                             "WARNING",
                         )
-                        confirmadas_correctas.add(hash_p)
+                        preguntas_incorrectas_en_ronda.append(pregunta_obj)
 
                 self._emit_stats()
 
@@ -890,6 +938,7 @@ class AutopilotRunner:
                     )
                     self.stats["hojas_completadas"] += 1
                     self._emit_stats()
+                    hoja_completada = True
                     break
 
                 self._log(
@@ -904,6 +953,13 @@ class AutopilotRunner:
 
             # ── F. Ir a la siguiente hoja ────────────────────────────────────
             if not self._running:
+                break
+
+            if not hoja_completada and not hoja_sin_preguntas:
+                self._log(
+                    f"Hoja {hojas_procesadas} no completada: no se avanzará hasta confirmar todas las preguntas.",
+                    "ERROR",
+                )
                 break
 
             self._log("Intentando avanzar a la siguiente hoja...", "INFO")
