@@ -60,7 +60,7 @@ class BotBrowser:
 
             // ── Selector de contenedores de preguntas ──────────────────────
             const containers = Array.from(document.querySelectorAll(
-                'ul.form-items > li, .form-items > li, li[data-type="OM"]'
+                'ul.form-items > li[data-type="OM"], ul.form-items > li[data-item], .form-items > li[data-type="OM"]'
             ));
 
             let targetContainer = null;
@@ -69,17 +69,27 @@ class BotBrowser:
             const getQuestionData = (container) => {
                 const qEl = container.querySelector('.question, .pregunta');
                 if (qEl) {
+                    // Clonar y eliminar la lista de opciones para no incluir su texto
                     const clone = qEl.cloneNode(true);
+                    clone.querySelectorAll('.form-list, .options-list, ul').forEach(el => el.remove());
                     return {
                         text: (clone.innerText || "").replace(/\s+/g, " ").trim(),
                         html: qEl.outerHTML
                     };
                 }
                 const pEl = container.querySelector('p, h2, h3, h4');
-                const source = pEl || container;
+                if (pEl) {
+                    return {
+                        text: (pEl.innerText || "").replace(/\s+/g, " ").trim(),
+                        html: pEl.outerHTML
+                    };
+                }
+                // Fallback: container sin opciones
+                const clone = container.cloneNode(true);
+                clone.querySelectorAll('.form-list, .options-list, ul').forEach(el => el.remove());
                 return {
-                    text: (source.innerText || "").replace(/\s+/g, " ").trim(),
-                    html: source.outerHTML
+                    text: (clone.innerText || "").replace(/\s+/g, " ").trim(),
+                    html: container.outerHTML
                 };
             };
 

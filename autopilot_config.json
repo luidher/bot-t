@@ -1,7 +1,7 @@
 {
     "_comentario": "Configuración de selectores CSS para el Modo Autopilot DB. Edita este archivo para adaptar el bot a tu plataforma sin tocar código.",
     "selectors": {
-        "question_container":  "ul.form-items > li, .form-items > li, li[data-type='OM']",
+        "question_container":  "ul.form-items > li[data-type='OM'], ul.form-items > li[data-item], .form-items > li[data-type='OM']",
         "question_text":       ".question, .pregunta, p, h2, h3, h4",
         "option_input":        "input[type='radio'], input[type='checkbox']",
         "option_label":        "label",
@@ -10,7 +10,9 @@
             ".respuesta-correcta",
             ".is-correct",
             "[class*='correct']",
-            "[class*='success']"
+            "[class*='success']",
+            ".acert",
+            "[class*='acert']"
         ],
         "incorrect_markers": [
             ".incorrect",
@@ -18,9 +20,30 @@
             ".is-incorrect",
             "[class*='incorrect']",
             "[class*='wrong']",
-            "[class*='error']"
+            "[class*='error']",
+            ".incorrecto",
+            "[class*='incorrecto']"
+        ],
+        "submit_button": [
+            "button.btn-submit",
+            "button[type='submit'].btn-form",
+            "input[type='submit'].btn-submit",
+            "button.btn-form.btn-submit",
+            "button[type='submit']:not(.btn-reload)"
+        ],
+        "reload_button": [
+            "button.btn-reload",
+            "button.btn-form.btn-reload",
+            ".reintentar",
+            "button[class*='reload']",
+            "button[class*='reintentar']",
+            "button[class*='retry']"
         ],
         "next_button": [
+            ".wrap-footer a",
+            "a.btnAccede",
+            "a[href*='/MiClase/inicia/']",
+            "a[href*='Siguiente']",
             "button.next",
             "a.next",
             "input[type='submit'][value*='iguiente']",
@@ -30,6 +53,8 @@
             ".next-page"
         ],
         "retry_button": [
+            "button.btn-reload",
+            "button.btn-form.btn-reload",
             "button.retry",
             "a.retry",
             "button[class*='retry']",
@@ -40,11 +65,12 @@
         ]
     },
     "timings": {
-        "feedback_wait_ms":   900,
+        "feedback_wait_ms":    1500,
         "after_click_wait_ms": 600,
-        "reload_wait_ms":     2000,
-        "next_wait_ms":       2500,
-        "dom_stable_wait_ms": 500
+        "reload_wait_ms":      2500,
+        "next_wait_ms":        3000,
+        "dom_stable_wait_ms":  700,
+        "after_submit_wait_ms": 2000
     },
     "auth": {
         "wait_for_manual_auth": true,
@@ -52,7 +78,12 @@
         "manual_auth_poll_sec": 1.0
     },
     "limits": {
-        "max_sheets":          10000,
-        "max_intentos_por_pregunta": 8
+        "max_sheets":                   10000,
+        "max_intentos_por_pregunta":    8,
+        "max_rondas_por_hoja":          20
+    },
+    "browser": {
+        "keep_open": false,
+        "pw_timeout_ms": 120000
     }
 }
