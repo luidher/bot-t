@@ -1,0 +1,47 @@
+
+{success: true, message: "",…}
+front
+: 
+[{tipo: "OM", id_item: "V3Hqvu8AUVimMgLnTPv8yB0nGSXL5tq0yjpvdYbRLr8=", class: "success"},…]
+0
+: 
+{tipo: "OM", id_item: "V3Hqvu8AUVimMgLnTPv8yB0nGSXL5tq0yjpvdYbRLr8=", class: "success"}
+1
+: 
+{tipo: "OM", id_item: "05wNHxSLFM8A13WCn0GV4PLGYfPKFqbxVWGx/bI19MM=", class: "wrong"}
+2
+: 
+{tipo: "OM", id_item: "jNM/8uU6zlodiyE2kZQq8LvbbHrDSpDOeGAFJZlS5Qw=", class: "wrong"}
+3
+: 
+{tipo: "OM", id_item: "P4pAAAI7fEmkIIgwdZbpY1pC6Bg5yv3tXKyQtSX2E+Q=", class: "wrong"}
+4
+: 
+{tipo: "OM", id_item: "SZSpoDITJ0cT54W7kzc1jRu0PPLh9soBz6jYyJKeWZQ=", class: "wrong"}
+intento
+: 
+5
+message
+: 
+""
+response
+: 
+{resultados: {cristales: 0, porcentaje: 20, monedas: 51}, constancia: ""}
+constancia
+: 
+""
+resultados
+: 
+{cristales: 0, porcentaje: 20, monedas: 51}
+cristales
+: 
+0
+monedas
+: 
+51
+porcentaje
+: 
+20
+success
+: 
+true
