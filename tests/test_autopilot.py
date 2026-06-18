@@ -55,7 +55,9 @@ class TestDBManager(unittest.TestCase):
         db.guardar_en_db(h, q_text, "Opción A", inmediato=True)
         
         ans = db.consultar_db(h)
-        self.assertEqual(ans, "Opción A")
+        self.assertIsNotNone(ans)
+        assert ans is not None
+        self.assertEqual(ans["texto"], "Opción A")
         self.assertEqual(db.contar_registros(), 1)
         db.close()
 
@@ -77,7 +79,10 @@ class TestDBManager(unittest.TestCase):
         db.flush_buffer()
         
         # Now should be there
-        self.assertEqual(db.consultar_db(h), "Opción B")
+        ans = db.consultar_db(h)
+        self.assertIsNotNone(ans)
+        assert ans is not None
+        self.assertEqual(ans["texto"], "Opción B")
         self.assertEqual(db.contar_registros(), 1)
         db.close()
 
@@ -143,6 +148,34 @@ class TestAutopilotRunnerHelpers(unittest.TestCase):
             "incorrect",
         )
 
+    def test_classify_submit_payloads_prefers_registrar_unidad_front_feedback(self) -> None:
+        runner = AutopilotRunner(
+            "http://test.com",
+            bot_config={},
+            keep_browser_open=False,
+            browser=MagicMock(),
+            log_callback=lambda msg, level: None,
+        )
+        try:
+            runner._last_submit_payloads = [
+                {
+                    "content_type": "application/json",
+                    "text": '{"success": true, "front": [{"id_item": "target-item", "class": "wrong"}]}',
+                    "priority": 0,
+                    "index": 2,
+                },
+                {
+                    "content_type": "application/json",
+                    "text": '{"success": true, "front": [{"id_item": "target-item", "class": "success"}]}',
+                    "priority": 100,
+                    "index": 1,
+                },
+            ]
+
+            self.assertEqual(runner._classify_from_submit_payloads("target-item"), "correct")
+        finally:
+            runner.db.close()
+
 
 class TestAutopilotRunnerMockFlows(unittest.TestCase):
     def setUp(self) -> None:
@@ -178,18 +211,22 @@ class TestAutopilotRunnerMockFlows(unittest.TestCase):
             return None
             
         runner.extraer_preguntas_y_opciones = mock_extract
+        runner._extraer_todas_las_preguntas = mock_extract
         
         h = DBManager.calcular_hash("Cuál es la capital de España?")
         runner.db.guardar_en_db(h, "Cuál es la capital de España?", "Madrid", inmediato=True)
         
         runner.hacer_clic_en_opcion = MagicMock(return_value=True)
+        runner._hacer_clic_en_opcion = runner.hacer_clic_en_opcion
+        runner._presionar_calificar = MagicMock(return_value=True)
+        runner._validar_pregunta = MagicMock(return_value="correct")
         runner.ir_a_siguiente_hoja = MagicMock(return_value=False)
         
         runner.run()
         
         self.assertEqual(runner.stats["respondidas_desde_db"], 1)
         self.assertEqual(runner.stats["respondidas_al_azar"], 0)
-        runner.hacer_clic_en_opcion.assert_called_once_with("#opt1", None)
+        runner._hacer_clic_en_opcion.assert_called_once_with("#opt1", None)
         
         runner.db.close()
 
@@ -219,8 +256,12 @@ class TestAutopilotRunnerMockFlows(unittest.TestCase):
             return None
             
         runner.extraer_preguntas_y_opciones = mock_extract
+        runner._extraer_todas_las_preguntas = MagicMock(return_value=[mock_question])
         runner.hacer_clic_en_opcion = MagicMock(return_value=True)
+        runner._hacer_clic_en_opcion = runner.hacer_clic_en_opcion
+        runner._presionar_calificar = MagicMock(return_value=True)
         runner.recargar_hoja_actual = MagicMock(return_value=True)
+        runner._presionar_reintentar = runner.recargar_hoja_actual
         runner.ir_a_siguiente_hoja = MagicMock(return_value=False)
         
         original_choice = random.choice
@@ -246,20 +287,137 @@ class TestAutopilotRunnerMockFlows(unittest.TestCase):
             return "unknown"
             
         runner.validar_acierto = mock_validate
+        runner._validar_pregunta = lambda data_item, opcion=None: mock_validate((opcion or {}).get("selector", ""))
         
         try:
             runner.run()
         finally:
             random.choice = original_choice
             
-        self.assertEqual(runner.stats["respondidas_desde_db"], 0)
+        self.assertEqual(runner.stats["respondidas_desde_db"], 1)
         self.assertEqual(runner.stats["respondidas_al_azar"], 1)
         self.assertEqual(runner.stats["nuevas_guardadas"], 1)
         
         h = DBManager.calcular_hash("Cuál es la capital de Italia?")
         ans = runner.db.consultar_db(h)
-        self.assertEqual(ans, "Roma")
+        self.assertIsNotNone(ans)
+        assert ans is not None
+        self.assertEqual(ans["texto"], "Roma")
         
+        runner.db.close()
+
+    def test_db_answer_discarded_after_server_wrong_is_not_reused(self) -> None:
+        runner = AutopilotRunner("http://test.com", bot_config={}, keep_browser_open=False, browser=MagicMock())
+        runner.db.close()
+        runner.db = DBManager(self.db_path)
+
+        question = "Capital de prueba?"
+        hash_p = DBManager.calcular_hash(question)
+        runner.db.guardar_en_db(
+            hash_p,
+            question,
+            "Respuesta vieja",
+            selector_correcto="old-op",
+            inmediato=True,
+        )
+
+        chosen = runner._elegir_opcion_para_pregunta(
+            {
+                "question": question,
+                "options": [
+                    {"texto": "Respuesta vieja", "selector": "#old", "data_op": "old-op"},
+                    {"texto": "Respuesta nueva", "selector": "#new", "data_op": "new-op"},
+                ],
+            },
+            {hash_p: {"ops": {"old-op"}, "txt": {"Respuesta vieja"}}},
+        )
+
+        self.assertIsNotNone(chosen)
+        assert chosen is not None
+        self.assertEqual(chosen["texto"], "Respuesta nueva")
+        runner.db.close()
+
+    def test_runner_retries_only_pending_before_next_sheet(self) -> None:
+        mock_browser = MagicMock()
+        mock_browser.page = MagicMock()
+
+        runner = AutopilotRunner("http://test.com", bot_config={}, keep_browser_open=False, browser=mock_browser)
+        runner.db.close()
+        runner.db = DBManager(self.db_path)
+        runner.timings.update({
+            "dom_stable_wait_ms": 0,
+            "feedback_wait_ms": 0,
+            "after_click_wait_ms": 0,
+            "after_submit_wait_ms": 0,
+            "reload_wait_ms": 0,
+            "next_wait_ms": 0,
+        })
+        runner.limits["max_sheets"] = 1
+        runner.limits["max_rondas_por_hoja"] = 3
+
+        q1 = {
+            "question": "Pregunta 1",
+            "data_item": "id-q1",
+            "answered": False,
+            "options": [
+                {"texto": "Correcta 1", "selector": "#q1a", "data_op": "q1a"},
+                {"texto": "Incorrecta 1", "selector": "#q1b", "data_op": "q1b"},
+            ],
+        }
+        q2 = {
+            "question": "Pregunta 2",
+            "data_item": "id-q2",
+            "answered": False,
+            "options": [
+                {"texto": "Incorrecta 2", "selector": "#q2a", "data_op": "q2a"},
+                {"texto": "Correcta 2", "selector": "#q2b", "data_op": "q2b"},
+            ],
+        }
+
+        runner._extraer_todas_las_preguntas = MagicMock(return_value=[q1, q2])
+        runner._hacer_clic_en_opcion = MagicMock(return_value=True)
+        runner._presionar_calificar = MagicMock(return_value=True)
+        runner._presionar_reintentar = MagicMock(return_value=True)
+        runner.ir_a_siguiente_hoja = MagicMock(return_value=False)
+
+        def mock_validate(data_item: str, opcion: dict | None = None) -> str:
+            data_op = (opcion or {}).get("data_op", "")
+            if data_item == "id-q1" and data_op == "q1a":
+                return "correct"
+            if data_item == "id-q2" and data_op == "q2b":
+                return "correct"
+            return "incorrect"
+
+        runner._validar_pregunta = mock_validate
+
+        original_choice = random.choice
+
+        def mock_choice(seq):
+            by_text = {item["texto"]: item for item in seq}
+            if "Correcta 1" in by_text:
+                return by_text["Correcta 1"]
+            if "Incorrecta 2" in by_text:
+                return by_text["Incorrecta 2"]
+            if "Correcta 2" in by_text:
+                return by_text["Correcta 2"]
+            return original_choice(seq)
+
+        random.choice = mock_choice
+        try:
+            runner.run()
+        finally:
+            random.choice = original_choice
+
+        clicked_selectors = [call.args[0] for call in runner._hacer_clic_en_opcion.call_args_list]
+        self.assertEqual(clicked_selectors, ["#q1a", "#q2a", "#q1a", "#q2b"])
+        runner._presionar_reintentar.assert_called_once()
+        runner.ir_a_siguiente_hoja.assert_called_once()
+
+        q1_hash = DBManager.calcular_hash("Pregunta 1")
+        q2_hash = DBManager.calcular_hash("Pregunta 2")
+        self.assertEqual(runner.db.consultar_db(q1_hash)["texto"], "Correcta 1")
+        self.assertEqual(runner.db.consultar_db(q2_hash)["texto"], "Correcta 2")
+
         runner.db.close()
 
 

@@ -99,6 +99,9 @@ def _load_autopilot_config() -> dict[str, Any]:
             "keep_open": False,
             "pw_timeout_ms": 120000,
         },
+        "network": {
+            "feedback_url_hints": ["registrar", "unidad", "registrar unidad"],
+        },
         "limits": {
             "max_sheets": 10000,
             "max_intentos_por_pregunta": 8,
@@ -120,6 +123,14 @@ def _load_autopilot_config() -> dict[str, Any]:
     except Exception as exc:
         print(f"[AUTOPILOT] Error cargando autopilot_config.json: {exc}. Usando defaults.")
         return defaults
+
+
+def _default_log_callback(msg: str, level: str) -> None:
+    text = f"[{level}] {msg}"
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        print(text.encode("ascii", errors="replace").decode("ascii"))
 
 
 # ---------------------------------------------------------------------------
@@ -339,11 +350,78 @@ _JS_FIND_BUTTON = r"""
         return rect.width > 0 && rect.height > 0;
     };
     document.querySelectorAll('[data-ap-temp-target="true"]').forEach(n => n.removeAttribute('data-ap-temp-target'));
+    // Primera pasada: preferir elementos visibles y fuera del header/buscador
+    for (const sel of selectorList) {
+        try {
+            const elements = Array.from(document.querySelectorAll(sel));
+            const buttons = [];
+            const anchors = [];
+            const others = [];
+            for (const el of elements) {
+                if (!isVisible(el)) continue;
+                const tag = (el.tagName || '').toLowerCase();
+                let href = '';
+                try {
+                    href = (el.getAttribute && el.getAttribute('href')) || (el.href || '') || '';
+                } catch (_) {
+                    href = '';
+                }
+
+                // Evitar elementos dentro del header o formularios de búsqueda
+                try {
+                    if (el.closest) {
+                        const hasSearchAncestor = el.closest('header')
+                            || el.closest('.search-container')
+                            || el.closest('.search-container-mobile')
+                            || el.closest('#navContainer')
+                            || el.closest('#formSearch')
+                            || el.closest('form[action*="Buscador"]');
+                        if (hasSearchAncestor) continue;
+                    }
+                } catch (_) {}
+
+                // Evitar enlaces que claramente llevan al buscador/resultados
+                if (tag === 'a' && href && /buscador|\/buscador|buscador=|buscador\/resultados/i.test(href)) {
+                    continue;
+                }
+
+                // Evitar botones explícitos de búsqueda
+                try {
+                    if (el.classList && el.classList.contains('search-button')) continue;
+                } catch (_) {}
+
+                if (tag === 'button' || (tag === 'input' && (el.type === 'submit' || el.type === 'button'))) {
+                    buttons.push(el);
+                } else if (tag === 'a') {
+                    anchors.push(el);
+                } else {
+                    others.push(el);
+                }
+            }
+
+            const pick = (buttons.length && buttons[0]) || (anchors.length && anchors[0]) || (others.length && others[0]);
+            if (pick) {
+                pick.setAttribute('data-ap-temp-target', 'true');
+                return '[data-ap-temp-target="true"]';
+            }
+        } catch (_) {}
+    }
+
+    // Segunda pasada: aceptar elementos ocultos si no se encontró ninguno visible
     for (const sel of selectorList) {
         try {
             const elements = Array.from(document.querySelectorAll(sel));
             for (const el of elements) {
-                if (!isVisible(el)) continue;
+                const tag = (el.tagName || '').toLowerCase();
+                let href = '';
+                try {
+                    href = (el.getAttribute && el.getAttribute('href')) || (el.href || '') || '';
+                } catch (_) {
+                    href = '';
+                }
+                // Evitar enlaces que claramente llevan al buscador/resultados
+                if (tag === 'a' && href && /buscador|\/buscador|buscador=|buscador\/resultados/i.test(href)) continue;
+                try { if (el.classList && el.classList.contains('search-button')) continue; } catch(_) {}
                 el.setAttribute('data-ap-temp-target', 'true');
                 return '[data-ap-temp-target="true"]';
             }
@@ -627,7 +705,7 @@ class AutopilotRunner:
         bot_config: dict[str, Any] | None = None,
     ) -> None:
         self.url = url
-        self.log_cb = log_callback or (lambda msg, lvl: print(f"[{lvl}] {msg}"))
+        self.log_cb = log_callback or _default_log_callback
         self.stats_cb = stats_callback or (lambda _: None)
         self.keep_browser_open = keep_browser_open
 
@@ -657,7 +735,7 @@ class AutopilotRunner:
 
         self._running = False
         self._paused = False
-        self._last_submit_payloads: list[dict[str, str]] = []
+        self._last_submit_payloads: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     # Control externo
@@ -850,6 +928,54 @@ class AutopilotRunner:
         except Exception:
             return None
 
+    def _submit_response_priority(self, response: Any, text: str, content_type: str) -> int:
+        """Prioriza respuestas que parecen ser el XHR de feedback de la unidad."""
+        score = 0
+        request = getattr(response, "request", None)
+        request_url = getattr(request, "url", "") if request is not None else ""
+        response_url = getattr(response, "url", "")
+        method = getattr(request, "method", "") if request is not None else ""
+        post_data = ""
+        if request is not None:
+            try:
+                raw_post_data = getattr(request, "post_data", "")
+                post_data = raw_post_data() if callable(raw_post_data) else raw_post_data
+            except Exception:
+                post_data = ""
+
+        location_text = _normalize_feedback_text(
+            f"{response_url} {request_url} {method} {post_data or ''}"
+        )
+        compact_location = re.sub(r"[^a-z0-9]+", "", location_text)
+        payload_text = _normalize_feedback_text(text[:20000])
+
+        hints = self.ap_cfg.get("network", {}).get(
+            "feedback_url_hints",
+            ["registrar", "unidad", "registrar unidad"],
+        )
+        for hint in hints:
+            hint_text = _normalize_feedback_text(hint)
+            if not hint_text:
+                continue
+            compact_hint = re.sub(r"[^a-z0-9]+", "", hint_text)
+            hint_words = [word for word in hint_text.split() if word]
+            if hint_text in location_text or (compact_hint and compact_hint in compact_location):
+                score += 35
+            elif hint_words and all(
+                word in location_text or word in compact_location
+                for word in hint_words
+            ):
+                score += 25
+
+        if "json" in content_type:
+            score += 5
+        if "front" in payload_text and "id_item" in payload_text and "class" in payload_text:
+            score += 100
+        if "success" in payload_text and ("wrong" in payload_text or "correct" in payload_text):
+            score += 20
+
+        return score
+
     def _finish_submit_response_capture(self, handler: Callable[[Any], None] | None) -> None:
         if not self.browser or not self.browser.page:
             return
@@ -863,9 +989,9 @@ class AutopilotRunner:
                 except Exception:
                     pass
 
-        payloads: list[dict[str, str]] = []
+        payloads: list[dict[str, Any]] = []
         responses = getattr(self, "_pending_submit_responses", [])
-        for response in list(responses)[-20:]:
+        for index, response in enumerate(list(responses)[-20:]):
             try:
                 headers = getattr(response, "headers", {}) or {}
                 content_type = headers.get("content-type", "").lower()
@@ -874,10 +1000,13 @@ class AutopilotRunner:
                 text = response.text()
                 if not text:
                     continue
+                priority = self._submit_response_priority(response, text, content_type)
                 payloads.append({
                     "url": getattr(response, "url", ""),
                     "content_type": content_type,
                     "text": text[:200000],
+                    "priority": priority,
+                    "index": index,
                 })
             except Exception:
                 continue
@@ -885,7 +1014,12 @@ class AutopilotRunner:
         self._last_submit_payloads = payloads
         self._pending_submit_responses = []
         if payloads:
-            self._log(f"Capturadas {len(payloads)} respuesta(s) del servidor tras 'Calificar'.", "DEBUG")
+            likely_feedback = sum(1 for item in payloads if int(item.get("priority", 0)) >= 60)
+            extra = f"; {likely_feedback} parecen feedback de Registrar unidad" if likely_feedback else ""
+            self._log(
+                f"Capturadas {len(payloads)} respuesta(s) del servidor tras 'Calificar'{extra}.",
+                "DEBUG",
+            )
 
     def _presionar_calificar(self) -> bool:
         """Hace clic en el botón 'Calificar' (btn-submit) para enviar la hoja."""
@@ -966,6 +1100,39 @@ class AutopilotRunner:
                     self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
                 except Exception:
                     pass
+
+                # Comprobar si la navegación llevó inesperadamente al buscador
+                try:
+                    current_url = getattr(self.browser.page, "url", "") or ""
+                    if isinstance(current_url, str) and "buscador" in current_url.lower():
+                        self._log(
+                            f"Click en 'Siguiente' redirigió a {current_url}. Revirtiendo y probando otra estrategia.",
+                            "WARNING",
+                        )
+                        try:
+                            self.browser.page.go_back(timeout=self._pw_timeout_ms)
+                            try:
+                                self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+
+                        for text_hint in ["Siguiente", "Next", "Continuar", "Submit", "Enviar"]:
+                            if self._click_by_visible_text(text_hint):
+                                wait_ms = self.timings.get("next_wait_ms", 3000)
+                                time.sleep(wait_ms / 1000)
+                                try:
+                                    self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                                except Exception:
+                                    pass
+                                self._log(f"Avanzado con botón '{text_hint}'.", "SUCCESS")
+                                return True
+
+                        return False
+                except Exception:
+                    pass
+
                 return True
 
         for text_hint in ["Siguiente", "Next", "Continuar", "Submit", "Enviar"]:
@@ -991,7 +1158,12 @@ class AutopilotRunner:
         option_text = (opcion or {}).get("texto", "")
         data_op = (opcion or {}).get("data_op", "")
 
-        for payload in reversed(self._last_submit_payloads):
+        payloads = sorted(
+            self._last_submit_payloads,
+            key=lambda item: (int(item.get("priority", 0)), int(item.get("index", 0))),
+            reverse=True,
+        )
+        for payload in payloads:
             text = payload.get("text", "")
             if not text:
                 continue
@@ -1089,10 +1261,16 @@ class AutopilotRunner:
     # Lógica de respuesta para una pregunta individual
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _opcion_descartada(opcion: dict, desc_ops: set[str], desc_txt: set[str]) -> bool:
+        data_op = opcion.get("data_op") or ""
+        texto = opcion.get("texto") or ""
+        return bool((data_op and data_op in desc_ops) or texto in desc_txt)
+
     def _elegir_opcion_para_pregunta(
         self,
         pregunta_obj: dict,
-        opciones_descartadas: dict[str, set[str]],
+        opciones_descartadas: dict[str, dict[str, set]],
     ) -> dict | None:
         """
         Elige la opción a marcar para una pregunta dada.
@@ -1112,6 +1290,7 @@ class AutopilotRunner:
         if respuesta_db is not None:
             texto_correcto = respuesta_db.get("texto", "")
             selector_correcto = respuesta_db.get("selector", "")
+            db_opcion_descartada = False
 
             # Intentar por data-op
             if selector_correcto:
@@ -1119,7 +1298,13 @@ class AutopilotRunner:
                     (o for o in opciones if o.get("data_op") == selector_correcto),
                     None,
                 )
-                if opcion:
+                if opcion and self._opcion_descartada(opcion, desc_ops, desc_txt):
+                    db_opcion_descartada = True
+                    self._log(
+                        f"  [DB] Omitiendo opcion descartada para '{texto_pregunta[:50]}...' -> '{opcion['texto']}'",
+                        "WARNING",
+                    )
+                if opcion and not self._opcion_descartada(opcion, desc_ops, desc_txt):
                     self._log(f"  [DB] Respondiendo '{texto_pregunta[:50]}...' → '{opcion['texto']}'", "SUCCESS")
                     return opcion
 
@@ -1128,21 +1313,36 @@ class AutopilotRunner:
                 (o for o in opciones if o["texto"].strip() == texto_correcto.strip()),
                 None,
             )
-            if opcion:
+            if opcion and self._opcion_descartada(opcion, desc_ops, desc_txt):
+                db_opcion_descartada = True
+                self._log(
+                    f"  [DB] Omitiendo opcion descartada para '{texto_pregunta[:50]}...' -> '{opcion['texto']}'",
+                    "WARNING",
+                )
+            if opcion and not self._opcion_descartada(opcion, desc_ops, desc_txt):
                 self._log(f"  [DB] Respondiendo '{texto_pregunta[:50]}...' → '{opcion['texto']}'", "SUCCESS")
                 return opcion
 
             # Similitud (fallback)
-            if opciones:
-                mejor = max(opciones, key=lambda o: _similarity(o["texto"], texto_correcto))
+            opciones_db_disponibles = [
+                o for o in opciones
+                if not self._opcion_descartada(o, desc_ops, desc_txt)
+            ]
+            if opciones_db_disponibles and not db_opcion_descartada:
+                mejor = max(opciones_db_disponibles, key=lambda o: _similarity(o["texto"], texto_correcto))
                 self._log(f"  [DB] Similitud → '{mejor['texto']}'", "INFO")
                 return mejor
+            if db_opcion_descartada:
+                self._log(
+                    f"  [DB] La respuesta guardada para '{texto_pregunta[:40]}...' "
+                    "ya fue descartada en esta hoja; probando otra opcion.",
+                    "WARNING",
+                )
 
         # 2. Elegir al azar (excluyendo descartadas)
         disponibles = [
             o for o in opciones
-            if (not o.get("data_op") or o.get("data_op") not in desc_ops)
-            and o["texto"] not in desc_txt
+            if not self._opcion_descartada(o, desc_ops, desc_txt)
         ]
         if not disponibles:
             self._log(f"  [AZAR] Sin opciones disponibles para '{texto_pregunta[:40]}...'", "ERROR")
