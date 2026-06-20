@@ -479,3 +479,150 @@ class TestAutopilotRunnerDOM(unittest.TestCase):
         self.assertEqual(data[0]["question"], "En el siguiente estanque hay ________ peces.")
         
         runner.db.close()
+
+
+class TestAutopilotMathImageCrystals(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = Path(self.temp_dir) / "test_autopilot.db"
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_math_formula_normalization(self) -> None:
+        # Test _normalize_feedback_text
+        from core.autopilot_runner import (
+            _normalize_feedback_text,
+            _math_normalized_equals,
+            _math_normalized_contains,
+        )
+        self.assertEqual(_normalize_feedback_text("13x−7y"), "13x-7y")
+        self.assertEqual(_normalize_feedback_text("9x²"), "9x2")
+        self.assertEqual(_normalize_feedback_text("a × b • c"), "a * b * c")
+
+        # Test _math_normalized_equals
+        self.assertTrue(_math_normalized_equals("\\frac{13x-7y}{9x^2-4y^2}", "13x-7y / 9x^2-4y^2"))
+        self.assertTrue(_math_normalized_equals("x_1^2", "x12"))
+        
+        # Test _math_normalized_contains
+        self.assertTrue(_math_normalized_contains("la respuesta es \\sqrt{25}", "sqrt(25)"))
+
+    def test_extract_todas_las_preguntas_mathjax(self) -> None:
+        # Test that _extraer_todas_las_preguntas processes MathJax HTML and preserves image tags
+        runner = AutopilotRunner("http://test.com", bot_config={}, keep_browser_open=False)
+        runner.db = DBManager(self.db_path)
+        runner.browser = MagicMock()
+        
+        mock_eval_result = [
+            {
+                "question": "Resolver la ecuación [img: formula.png]",
+                "question_html": "<div>Resolver la ecuación <math><mfrac><mi>x</mi><mn>2</mn></mfrac></math></div>",
+                "options": [
+                    {
+                        "texto": "Opción 1 [img: opt.png]",
+                        "html": "<label><math><msup><mi>x</mi><mn>2</mn></msup></math></label>",
+                        "selector": "#opt1",
+                    }
+                ]
+            }
+        ]
+        runner.browser.page.evaluate = MagicMock(return_value=mock_eval_result)
+        
+        res = runner._extraer_todas_las_preguntas()
+        self.assertIsNotNone(res)
+        self.assertEqual(res[0]["question"], "Resolver la ecuación x/2 [img: formula.png]")
+        self.assertEqual(res[0]["options"][0]["texto"], "x^2 [img: opt.png]")
+        
+        runner.db.close()
+
+    def test_crystals_detection_payloads(self) -> None:
+        runner = AutopilotRunner("http://test.com", bot_config={}, keep_browser_open=False)
+        runner.db = DBManager(self.db_path)
+        
+        # Test finding in structured payload
+        runner._last_submit_payloads = [
+            {
+                "text": '{"response": {"resultados": {"cristales": 2, "porcentaje": 66}}, "success": true}',
+                "content_type": "application/json"
+            }
+        ]
+        self.assertEqual(runner._check_cristales_in_payloads(), 2)
+
+        # Test recursive find
+        runner._last_submit_payloads = [
+            {
+                "text": '{"nested": {"foo": {"cristales": 3}}}',
+                "content_type": "application/json"
+            }
+        ]
+        self.assertEqual(runner._check_cristales_in_payloads(), 3)
+        
+        runner.db.close()
+
+    def test_crystals_detection_dom(self) -> None:
+        runner = AutopilotRunner("http://test.com", bot_config={}, keep_browser_open=False)
+        runner.db = DBManager(self.db_path)
+        runner.browser = MagicMock()
+        
+        runner.browser.page.evaluate = MagicMock(return_value=3)
+        self.assertEqual(runner._obtener_cristales_dom(), 3)
+        
+        runner.db.close()
+
+    def test_crystals_retry_loop(self) -> None:
+        # Verify that if cristales < 3, the run loop clears confirmadas_correctas and retries
+        runner = AutopilotRunner("http://test.com", bot_config={}, keep_browser_open=False)
+        runner.db = DBManager(self.db_path)
+        runner.browser = MagicMock()
+        
+        runner.timings.update({
+            "dom_stable_wait_ms": 0,
+            "feedback_wait_ms": 0,
+            "after_click_wait_ms": 0,
+            "after_submit_wait_ms": 0,
+            "reload_wait_ms": 0,
+            "next_wait_ms": 0,
+        })
+        runner.limits["max_sheets"] = 1
+        runner.limits["max_rondas_por_hoja"] = 2
+        
+        q1 = {
+            "question": "Pregunta simple",
+            "data_item": "id-q1",
+            "answered": False,
+            "options": [
+                {"texto": "Opción A", "selector": "#a", "data_op": "a"},
+                {"texto": "Opción B", "selector": "#b", "data_op": "b"},
+            ],
+        }
+        
+        # Mock DOM extraction: return the question on both rounds
+        runner._extraer_todas_las_preguntas = MagicMock(return_value=[q1])
+        runner._hacer_clic_en_opcion = MagicMock(return_value=True)
+        runner._presionar_calificar = MagicMock(return_value=True)
+        runner._presionar_reintentar = MagicMock(return_value=True)
+        runner.ir_a_siguiente_hoja = MagicMock(return_value=False)
+        
+        # Correct classification
+        runner._validar_pregunta = MagicMock(return_value="correct")
+        
+        # First round: 2 crystals (less than 3)
+        # Second round: 3 crystals (success)
+        crystal_values = [2, 3]
+        def mock_obtener_cristales():
+            if crystal_values:
+                return crystal_values.pop(0)
+            return 3
+        runner._obtener_cristales = mock_obtener_cristales
+        
+        # Run
+        runner.run()
+        
+        # Because cristales was < 3 on the first round, confirmadas_correctas should have been cleared,
+        # forcing it to re-answer the questions in the second round.
+        # This means _hacer_clic_en_opcion should have been called twice (once per round).
+        self.assertEqual(runner._hacer_clic_en_opcion.call_count, 2)
+        runner._presionar_reintentar.assert_called_once()
+        
+        runner.db.close()
+

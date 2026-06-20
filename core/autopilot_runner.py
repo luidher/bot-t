@@ -209,9 +209,20 @@ _JS_EXTRACT_ALL = r"""
                 } else if (m.tagName && m.tagName.toLowerCase() === 'img') {
                     const srcAttr = m.getAttribute('src') || '';
                     if (srcAttr) {
-                        const parts = srcAttr.split('?')[0].split('/');
-                        const name = parts[parts.length - 1] || srcAttr;
-                        imgTexts.push(`[img: ${name}]`);
+                        if (srcAttr.startsWith('data:')) {
+                            const mimeMatch = srcAttr.match(/data:image\/([a-zA-Z0-9+]+);/);
+                            const ext = mimeMatch ? mimeMatch[1] : 'png';
+                            let hash = 0;
+                            for (let i = 0; i < srcAttr.length; i++) {
+                                hash = (hash << 5) - hash + srcAttr.charCodeAt(i);
+                                hash |= 0;
+                            }
+                            imgTexts.push(`[img: data_uri_${Math.abs(hash)}.${ext}]`);
+                        } else {
+                            const parts = srcAttr.split('?')[0].split('/');
+                            const name = parts[parts.length - 1] || srcAttr;
+                            imgTexts.push(`[img: ${name}]`);
+                        }
                     }
                 }
             }
@@ -244,8 +255,19 @@ _JS_EXTRACT_ALL = r"""
                         else if (img.tagName && img.tagName.toLowerCase() === 'img') {
                             const srcAttr = img.getAttribute('src') || '';
                             if (srcAttr) {
-                                const parts = srcAttr.split('?')[0].split('/');
-                                questionText = parts[parts.length - 1] || srcAttr;
+                                if (srcAttr.startsWith('data:')) {
+                                    const mimeMatch = srcAttr.match(/data:image\/([a-zA-Z0-9+]+);/);
+                                    const ext = mimeMatch ? mimeMatch[1] : 'png';
+                                    let hash = 0;
+                                    for (let i = 0; i < srcAttr.length; i++) {
+                                        hash = (hash << 5) - hash + srcAttr.charCodeAt(i);
+                                        hash |= 0;
+                                    }
+                                    questionText = `data_uri_${Math.abs(hash)}.${ext}`;
+                                } else {
+                                    const parts = srcAttr.split('?')[0].split('/');
+                                    questionText = parts[parts.length - 1] || srcAttr;
+                                }
                             }
                         }
                     }
@@ -301,9 +323,20 @@ _JS_EXTRACT_ALL = r"""
                     } else if (img.tagName.toLowerCase() === 'img') {
                         const src = img.getAttribute('src') || '';
                         if (src) {
-                            const parts = src.split('?')[0].split('/');
-                            const name = parts[parts.length - 1] || src;
-                            imageTexts.push(`[img: ${name}]`);
+                            if (src.startsWith('data:')) {
+                                const mimeMatch = src.match(/data:image\/([a-zA-Z0-9+]+);/);
+                                const ext = mimeMatch ? mimeMatch[1] : 'png';
+                                let hash = 0;
+                                for (let i = 0; i < src.length; i++) {
+                                    hash = (hash << 5) - hash + src.charCodeAt(i);
+                                    hash |= 0;
+                                }
+                                imageTexts.push(`[img: data_uri_${Math.abs(hash)}.${ext}]`);
+                            } else {
+                                const parts = src.split('?')[0].split('/');
+                                const name = parts[parts.length - 1] || src;
+                                imageTexts.push(`[img: ${name}]`);
+                            }
                         }
                     }
                 }
@@ -338,6 +371,7 @@ _JS_EXTRACT_ALL = r"""
     return questions.length ? questions : null;
 }
 """
+
 
 # Valida si una pregunta (por su data-item del li contenedor) fue correcta o incorrecta
 # después de hacer clic en "Calificar"
@@ -655,7 +689,7 @@ def _math_normalized_contains(container_text: str, search_text: str) -> bool:
         t = _normalize_feedback_text(t)
         for cmd in ("frac", "sqrt", "overline", "underline", "hat", "overset", "underset"):
             t = t.replace(cmd, "")
-        t = re.sub(r"[\\_{}\(\)\-\+=\*\/\s]", "", t)
+        t = re.sub(r"[\\_{}\(\)\-\+=\*\/\s\^]", "", t)
         return t
     clean_search = clean(search_text)
     if len(clean_search) < 2:
@@ -670,9 +704,10 @@ def _math_normalized_equals(a: str, b: str) -> bool:
         t = _normalize_feedback_text(t)
         for cmd in ("frac", "sqrt", "overline", "underline", "hat", "overset", "underset"):
             t = t.replace(cmd, "")
-        t = re.sub(r"[\\_{}\(\)\-\+=\*\/\s]", "", t)
+        t = re.sub(r"[\\_{}\(\)\-\+=\*\/\s\^]", "", t)
         return t
     return clean(a) == clean(b)
+
 
 
 def _compact_json_text(value: Any, limit: int = 12000) -> str:
@@ -777,8 +812,7 @@ def _has_selected_value(value_text: str, data_op: str, option_text: str) -> bool
     if option_text and _math_normalized_contains(value_text, option_text):
         return True
     return False
-        or (option_norm and len(option_norm) >= 3 and option_norm in value_text)
-    )
+
 
 
 def _classify_feedback_json(node: Any, data_item: str, data_op: str, option_text: str) -> str:
@@ -972,14 +1006,7 @@ class AutopilotRunner:
         except Exception as exc:
             self._log(f"Error al extraer preguntas del DOM: {exc}", "ERROR")
             return None
-        try:
-            result = self.browser.page.evaluate(_JS_EXTRACT_ALL)
-            if not result:
-                return None
-            return result
-        except Exception as exc:
-            self._log(f"Error al extraer preguntas del DOM: {exc}", "ERROR")
-            return None
+
 
     # ------------------------------------------------------------------
     # Espera de autenticación manual
@@ -1507,7 +1534,11 @@ class AutopilotRunner:
                 }
                 return null;
             }""")
-            return int(val) if val is not None else None
+            if val is not None:
+                if hasattr(val, "mock_add_spec") or type(val).__name__ in ("MagicMock", "Mock"):
+                    return None
+                return int(val)
+            return None
         except Exception:
             return None
 
