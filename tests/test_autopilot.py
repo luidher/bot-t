@@ -535,6 +535,34 @@ class TestAutopilotMathImageCrystals(unittest.TestCase):
         
         runner.db.close()
 
+    def test_image_extraction_unique_filenames(self) -> None:
+        # Test that _extraer_todas_las_preguntas processes and keeps unique filenames mock results
+        runner = AutopilotRunner("http://test.com", bot_config={}, keep_browser_open=False)
+        runner.db = DBManager(self.db_path)
+        runner.browser = MagicMock()
+        
+        mock_eval_result = [
+            {
+                "question": "¿Cuál de las figuras está hecha con el siguiente tangram? [img: BP3.png]",
+                "question_html": "<div>¿Cuál de las figuras está hecha con el siguiente tangram? <img src=\"https://cdn.pruebat.org/.../BP3.png\" alt=\"Pregunta\"></div>",
+                "options": [
+                    {
+                        "texto": "[img: P3O3.png]",
+                        "html": "<label><img src=\"https://cdn.pruebat.org/.../P3O3.png\"></label>",
+                        "selector": "#opt1",
+                    }
+                ]
+            }
+        ]
+        runner.browser.page.evaluate = MagicMock(return_value=mock_eval_result)
+        
+        res = runner._extraer_todas_las_preguntas()
+        self.assertIsNotNone(res)
+        self.assertEqual(res[0]["question"], "¿Cuál de las figuras está hecha con el siguiente tangram? [img: BP3.png]")
+        self.assertEqual(res[0]["options"][0]["texto"], "[img: P3O3.png]")
+        
+        runner.db.close()
+
     def test_crystals_detection_payloads(self) -> None:
         runner = AutopilotRunner("http://test.com", bot_config={}, keep_browser_open=False)
         runner.db = DBManager(self.db_path)

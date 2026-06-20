@@ -203,27 +203,39 @@ _JS_EXTRACT_ALL = r"""
                 }
                 if (isInsideOption) continue;
 
-                const alt = (m.getAttribute && (m.getAttribute('alt') || m.getAttribute('title') || m.getAttribute('aria-label'))) || '';
-                if (alt.trim()) {
-                    imgTexts.push(`[img: ${alt.trim()}]`);
-                } else if (m.tagName && m.tagName.toLowerCase() === 'img') {
-                    const srcAttr = m.getAttribute('src') || '';
-                    if (srcAttr) {
-                        if (srcAttr.startsWith('data:')) {
-                            const mimeMatch = srcAttr.match(/data:image\/([a-zA-Z0-9+]+);/);
-                            const ext = mimeMatch ? mimeMatch[1] : 'png';
-                            let hash = 0;
-                            for (let i = 0; i < srcAttr.length; i++) {
-                                hash = (hash << 5) - hash + srcAttr.charCodeAt(i);
-                                hash |= 0;
-                            }
-                            imgTexts.push(`[img: data_uri_${Math.abs(hash)}.${ext}]`);
-                        } else {
-                            const parts = srcAttr.split('?')[0].split('/');
-                            const name = parts[parts.length - 1] || srcAttr;
-                            imgTexts.push(`[img: ${name}]`);
+                let imgIdentifier = '';
+                const isImgTag = m.tagName && m.tagName.toLowerCase() === 'img';
+                const srcAttr = isImgTag ? (m.getAttribute('src') || '') : '';
+                if (srcAttr) {
+                    if (srcAttr.startsWith('data:')) {
+                        const mimeMatch = srcAttr.match(/data:image\/([a-zA-Z0-9+]+);/);
+                        const ext = mimeMatch ? mimeMatch[1] : 'png';
+                        let hash = 0;
+                        for (let i = 0; i < srcAttr.length; i++) {
+                            hash = (hash << 5) - hash + srcAttr.charCodeAt(i);
+                            hash |= 0;
                         }
+                        imgIdentifier = `data_uri_${Math.abs(hash)}.${ext}`;
+                    } else {
+                        const parts = srcAttr.split('?')[0].split('/');
+                        imgIdentifier = parts[parts.length - 1] || srcAttr;
                     }
+                }
+
+                const alt = (m.getAttribute && (m.getAttribute('alt') || m.getAttribute('title') || m.getAttribute('aria-label'))) || '';
+                const altClean = alt.trim().replace(/\s+/g, ' ');
+
+                let label = '';
+                if (imgIdentifier && altClean && altClean.toLowerCase() !== 'pregunta' && altClean.toLowerCase() !== 'imagen') {
+                    label = `${imgIdentifier} - ${altClean}`;
+                } else if (imgIdentifier) {
+                    label = imgIdentifier;
+                } else if (altClean) {
+                    label = altClean;
+                }
+
+                if (label) {
+                    imgTexts.push(`[img: ${label}]`);
                 }
             }
             if (imgTexts.length > 0) {
@@ -249,27 +261,38 @@ _JS_EXTRACT_ALL = r"""
                 try {
                     const img = container.querySelector('img, svg, canvas');
                     if (img) {
-                        const alt = (img.getAttribute && (img.getAttribute('alt') || img.getAttribute('title') || img.getAttribute('aria-label'))) || '';
-                        const altNorm = (alt || '').replace(/\s+/g, ' ').trim();
-                        if (altNorm) questionText = altNorm;
-                        else if (img.tagName && img.tagName.toLowerCase() === 'img') {
-                            const srcAttr = img.getAttribute('src') || '';
-                            if (srcAttr) {
-                                if (srcAttr.startsWith('data:')) {
-                                    const mimeMatch = srcAttr.match(/data:image\/([a-zA-Z0-9+]+);/);
-                                    const ext = mimeMatch ? mimeMatch[1] : 'png';
-                                    let hash = 0;
-                                    for (let i = 0; i < srcAttr.length; i++) {
-                                        hash = (hash << 5) - hash + srcAttr.charCodeAt(i);
-                                        hash |= 0;
-                                    }
-                                    questionText = `data_uri_${Math.abs(hash)}.${ext}`;
-                                } else {
-                                    const parts = srcAttr.split('?')[0].split('/');
-                                    questionText = parts[parts.length - 1] || srcAttr;
+                        let imgIdentifier = '';
+                        const isImgTag = img.tagName && img.tagName.toLowerCase() === 'img';
+                        const srcAttr = isImgTag ? (img.getAttribute('src') || '') : '';
+                        if (srcAttr) {
+                            if (srcAttr.startsWith('data:')) {
+                                const mimeMatch = srcAttr.match(/data:image\/([a-zA-Z0-9+]+);/);
+                                const ext = mimeMatch ? mimeMatch[1] : 'png';
+                                let hash = 0;
+                                for (let i = 0; i < srcAttr.length; i++) {
+                                    hash = (hash << 5) - hash + srcAttr.charCodeAt(i);
+                                    hash |= 0;
                                 }
+                                imgIdentifier = `data_uri_${Math.abs(hash)}.${ext}`;
+                            } else {
+                                const parts = srcAttr.split('?')[0].split('/');
+                                imgIdentifier = parts[parts.length - 1] || srcAttr;
                             }
                         }
+
+                        const alt = (img.getAttribute && (img.getAttribute('alt') || img.getAttribute('title') || img.getAttribute('aria-label'))) || '';
+                        const altClean = alt.trim().replace(/\s+/g, ' ');
+
+                        let label = '';
+                        if (imgIdentifier && altClean && altClean.toLowerCase() !== 'pregunta' && altClean.toLowerCase() !== 'imagen') {
+                            label = `${imgIdentifier} - ${altClean}`;
+                        } else if (imgIdentifier) {
+                            label = imgIdentifier;
+                        } else if (altClean) {
+                            label = altClean;
+                        }
+
+                        if (label) questionText = label;
                     }
                 } catch (_) {}
             }
@@ -317,27 +340,39 @@ _JS_EXTRACT_ALL = r"""
                 const images = Array.from(optionRoot.querySelectorAll('img, svg, canvas'));
                 const imageTexts = [];
                 for (const img of images) {
-                    const alt = img.getAttribute('alt') || img.getAttribute('title') || img.getAttribute('aria-label') || '';
-                    if (alt.trim()) {
-                        imageTexts.push(`[img: ${alt.trim()}]`);
-                    } else if (img.tagName.toLowerCase() === 'img') {
-                        const src = img.getAttribute('src') || '';
-                        if (src) {
-                            if (src.startsWith('data:')) {
-                                const mimeMatch = src.match(/data:image\/([a-zA-Z0-9+]+);/);
-                                const ext = mimeMatch ? mimeMatch[1] : 'png';
-                                let hash = 0;
-                                for (let i = 0; i < src.length; i++) {
-                                    hash = (hash << 5) - hash + src.charCodeAt(i);
-                                    hash |= 0;
-                                }
-                                imageTexts.push(`[img: data_uri_${Math.abs(hash)}.${ext}]`);
-                            } else {
-                                const parts = src.split('?')[0].split('/');
-                                const name = parts[parts.length - 1] || src;
-                                imageTexts.push(`[img: ${name}]`);
+                    let imgIdentifier = '';
+                    const isImgTag = img.tagName && img.tagName.toLowerCase() === 'img';
+                    const srcAttr = isImgTag ? (img.getAttribute('src') || '') : '';
+                    if (srcAttr) {
+                        if (srcAttr.startsWith('data:')) {
+                            const mimeMatch = srcAttr.match(/data:image\/([a-zA-Z0-9+]+);/);
+                            const ext = mimeMatch ? mimeMatch[1] : 'png';
+                            let hash = 0;
+                            for (let i = 0; i < srcAttr.length; i++) {
+                                hash = (hash << 5) - hash + srcAttr.charCodeAt(i);
+                                hash |= 0;
                             }
+                            imgIdentifier = `data_uri_${Math.abs(hash)}.${ext}`;
+                        } else {
+                            const parts = srcAttr.split('?')[0].split('/');
+                            imgIdentifier = parts[parts.length - 1] || srcAttr;
                         }
+                    }
+
+                    const alt = img.getAttribute('alt') || img.getAttribute('title') || img.getAttribute('aria-label') || '';
+                    const altClean = alt.trim().replace(/\s+/g, ' ');
+
+                    let label = '';
+                    if (imgIdentifier && altClean && altClean.toLowerCase() !== 'pregunta' && altClean.toLowerCase() !== 'imagen') {
+                        label = `${imgIdentifier} - ${altClean}`;
+                    } else if (imgIdentifier) {
+                        label = imgIdentifier;
+                    } else if (altClean) {
+                        label = altClean;
+                    }
+
+                    if (label) {
+                        imageTexts.push(`[img: ${label}]`);
                     }
                 }
                 if (imageTexts.length > 0) {
@@ -975,7 +1010,7 @@ class AutopilotRunner:
                             # Preservar las etiquetas [img: ...] del JS
                             js_imgs = re.findall(r"\[img:\s*[^\]]+\]", p.get("question", ""))
                             if js_imgs:
-                                q_text = f"{q_text} {' '.join(js_imgs)}"
+                                q_text = f"{q_text} {' '.join(js_imgs)}".strip()
                             
                             if q_text:
                                 p["question"] = q_text
@@ -993,7 +1028,7 @@ class AutopilotRunner:
                                 # Preservar las etiquetas [img: ...] del JS
                                 js_opt_imgs = re.findall(r"\[img:\s*[^\]]+\]", o.get("texto", ""))
                                 if js_opt_imgs:
-                                    o_text = f"{o_text} {' '.join(js_opt_imgs)}"
+                                    o_text = f"{o_text} {' '.join(js_opt_imgs)}".strip()
                                 
                                 if o_text:
                                     o["texto"] = o_text
