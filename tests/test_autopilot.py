@@ -337,6 +337,55 @@ class TestAutopilotRunnerMockFlows(unittest.TestCase):
         self.assertEqual(chosen["texto"], "Respuesta nueva")
         runner.db.close()
 
+    def test_runner_does_not_resave_correct_db_answer(self) -> None:
+        mock_browser = MagicMock()
+        mock_page = MagicMock()
+        mock_browser.page = mock_page
+        
+        runner = AutopilotRunner("http://test.com", bot_config={}, keep_browser_open=False)
+        runner.browser = mock_browser
+        runner.db = DBManager(self.db_path)
+        
+        mock_question = {
+            "question": "Cuál es la capital de España?",
+            "options": [
+                {"texto": "Madrid", "selector": "#opt1"},
+                {"texto": "Barcelona", "selector": "#opt2"}
+            ]
+        }
+        
+        call_count = 0
+        def mock_extract():
+            nonlocal call_count
+            if call_count == 0:
+                call_count += 1
+                return [mock_question]
+            return None
+            
+        runner.extraer_preguntas_y_opciones = mock_extract
+        runner._extraer_todas_las_preguntas = mock_extract
+        
+        h = DBManager.calcular_hash("Cuál es la capital de España?")
+        runner.db.guardar_en_db(h, "Cuál es la capital de España?", "Madrid", inmediato=True)
+        
+        # Guardar espía del método guardar_en_db
+        runner.db.guardar_en_db = MagicMock(side_effect=runner.db.guardar_en_db)
+        
+        runner.hacer_clic_en_opcion = MagicMock(return_value=True)
+        runner._hacer_clic_en_opcion = runner.hacer_clic_en_opcion
+        runner._presionar_calificar = MagicMock(return_value=True)
+        runner._validar_pregunta = MagicMock(return_value="correct")
+        runner.ir_a_siguiente_hoja = MagicMock(return_value=False)
+        
+        runner.run()
+        
+        # Verificar que no se llamó a guardar_en_db durante el flujo
+        runner.db.guardar_en_db.assert_not_called()
+        self.assertEqual(runner.stats["nuevas_guardadas"], 0)
+        self.assertEqual(runner.stats["respondidas_desde_db"], 1)
+        
+        runner.db.close()
+
     def test_runner_retries_only_pending_before_next_sheet(self) -> None:
         mock_browser = MagicMock()
         mock_browser.page = MagicMock()

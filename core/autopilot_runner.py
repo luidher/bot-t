@@ -1699,6 +1699,7 @@ class AutopilotRunner:
                 else:
                     attempts_for_q[opcion["texto"]] = attempts_for_q.get(opcion["texto"], 0) + 1
                     self._log(f"  [DB] Respondiendo '{texto_pregunta[:50]}...' → '{opcion['texto']}'", "SUCCESS")
+                    opcion["_from_db"] = True
                     return opcion
 
                 if db_opcion_descartada:
@@ -1747,6 +1748,7 @@ class AutopilotRunner:
                 f"seleccionando forzado '{elegida['texto']}' (intento #{attempts_for_q.get(elegida['texto'], 0)})",
                 "WARNING",
             )
+            elegida["_from_db"] = False
             return elegida
 
         # Elegir entre las disponibles la que tenga menos intentos (balancear exploración)
@@ -1763,6 +1765,7 @@ class AutopilotRunner:
         elegida = random.choice(candidates) if candidates else random.choice(disponibles)
         attempts_for_q[elegida["texto"]] = attempts_for_q.get(elegida["texto"], 0) + 1
         self._log(f"  [AZAR] '{texto_pregunta[:50]}...' → '{elegida['texto']}'", "INFO")
+        elegida["_from_db"] = False
         return elegida
 
     # ------------------------------------------------------------------
@@ -1918,24 +1921,30 @@ class AutopilotRunner:
                     )
 
                     if feedback == "correct":
-                        # Guardar en DB si no está ya
+                        # Guardar en DB si no está ya y no se respondió desde la DB
                         if hash_p not in confirmadas_correctas:
-                            selector_a_guardar = (
-                                opcion_elegida.get("data_op") or opcion_elegida["selector"]
-                            )
-                            self._log(
-                                f"  ✔ CORRECTO → guardando en DB: '{opcion_elegida['texto']}'",
-                                "SUCCESS",
-                            )
-                            self.db.guardar_en_db(
-                                hash_p,
-                                pregunta_obj["question"],
-                                opcion_elegida["texto"],
-                                selector_correcto=selector_a_guardar,
-                                inmediato=True,
-                            )
+                            if not opcion_elegida.get("_from_db"):
+                                selector_a_guardar = (
+                                    opcion_elegida.get("data_op") or opcion_elegida["selector"]
+                                )
+                                self._log(
+                                    f"  ✔ CORRECTO → guardando en DB: '{opcion_elegida['texto']}'",
+                                    "SUCCESS",
+                                )
+                                self.db.guardar_en_db(
+                                    hash_p,
+                                    pregunta_obj["question"],
+                                    opcion_elegida["texto"],
+                                    selector_correcto=selector_a_guardar,
+                                    inmediato=True,
+                                )
+                                self.stats["nuevas_guardadas"] += 1
+                            else:
+                                self._log(
+                                    f"  ✔ CORRECTO (ya estaba en DB) → omitiendo guardar para evitar duplicados: '{opcion_elegida['texto']}'",
+                                    "INFO",
+                                )
                             confirmadas_correctas.add(hash_p)
-                            self.stats["nuevas_guardadas"] += 1
                         self.stats["respondidas_desde_db"] += 1
 
                     elif feedback == "incorrect":
