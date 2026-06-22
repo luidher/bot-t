@@ -19,6 +19,7 @@ import sqlite3
 import time
 from pathlib import Path
 from typing import Optional
+import unicodedata
 
 # Ruta por defecto de la base de datos
 DEFAULT_DB_PATH = Path("autopilot_respuestas.db")
@@ -32,7 +33,7 @@ class DBManager:
 
     def __init__(self, db_path: Path | str = DEFAULT_DB_PATH) -> None:
         self.db_path = Path(db_path)
-        self._buffer: list[tuple[str, str, str, str]] = []  # (hash, pregunta, opcion, selector)
+        self._buffer: list[tuple[str, str, str, str, str]] = []  # (hash, pregunta, opcion, selector, data_item)
         self._conn: Optional[sqlite3.Connection] = None
         self._init_db()
 
@@ -52,18 +53,19 @@ class DBManager:
         """Crea la tabla e índice si no existen. Migra columnas nuevas si la BD ya existe."""
         conn = self._connect()
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS respuestas (
-                id                INTEGER PRIMARY KEY AUTOINCREMENT,
-                hash_pregunta     TEXT    UNIQUE NOT NULL,
-                texto_pregunta    TEXT    NOT NULL,
-                opcion_correcta   TEXT    NOT NULL,
-                selector_correcto TEXT    DEFAULT '',
-                fecha_guardado    DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
+        CREATE TABLE IF NOT EXISTS respuestas (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            hash_pregunta     TEXT    UNIQUE NOT NULL,
+            texto_pregunta    TEXT    NOT NULL,
+            opcion_correcta   TEXT    NOT NULL,
+            selector_correcto TEXT    DEFAULT '',
+            data_item         TEXT    DEFAULT '',
+            fecha_guardado    DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
         """)
         conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_hash
-            ON respuestas(hash_pregunta)
+        CREATE INDEX IF NOT EXISTS idx_hash
+        ON respuestas(hash_pregunta)
         """)
         conn.commit()
 
@@ -73,6 +75,9 @@ class DBManager:
             cols = [row[1] for row in cur.fetchall()]
             if "selector_correcto" not in cols:
                 conn.execute("ALTER TABLE respuestas ADD COLUMN selector_correcto TEXT DEFAULT ''")
+                conn.commit()
+            if "data_item" not in cols:
+                conn.execute("ALTER TABLE respuestas ADD COLUMN data_item TEXT DEFAULT ''")
                 conn.commit()
         except Exception:
             pass
@@ -84,10 +89,21 @@ class DBManager:
     @staticmethod
     def calcular_hash(texto: str) -> str:
         """
-        Normaliza el texto (minúsculas, espacios múltiples → uno) y devuelve
-        su SHA-256 en formato hexadecimal.
+        Normaliza el texto aplicando normalización de compatibilidad (NFKC),
+        elimina marcas combinantes, colapsa espacios y retorna su SHA-256
+        en formato hexadecimal.
+        Esta normalización reduce falsos negativos por caracteres de presentación
+        (p.ej. caracteres matemáticos) o variaciones de espacios/acento.
         """
-        texto_normalizado = re.sub(r"\s+", " ", texto.lower().strip())
+        if texto is None:
+            texto = ""
+        # Aplicar normalización de compatibilidad para mapear caracteres
+        # 'mathematical italic' y similares a sus equivalentes ASCII
+        texto_normalizado = unicodedata.normalize("NFKC", str(texto))
+        # Eliminar marcas combinantes remanentes
+        texto_normalizado = "".join(ch for ch in texto_normalizado if not unicodedata.combining(ch))
+        # Minúsculas y colapsar espacios
+        texto_normalizado = re.sub(r"\s+", " ", texto_normalizado.lower().strip())
         return hashlib.sha256(texto_normalizado.encode("utf-8")).hexdigest()
 
     def consultar_db(self, hash_pregunta: str) -> Optional[dict]:
@@ -122,19 +138,37 @@ class DBManager:
             return None
         return {"texto": row[0], "selector": row[1], "hash": row[2]}
 
+    def consultar_por_data_item(self, data_item: str) -> Optional[dict]:
+        """
+        Busca por `data_item` registrado en la tabla (si existe).
+        Retorna un dict {'texto': str, 'selector': str, 'hash': str} o None.
+        """
+        if not data_item:
+            return None
+        conn = self._connect()
+        cur = conn.execute(
+            "SELECT opcion_correcta, selector_correcto, hash_pregunta FROM respuestas WHERE data_item = ?",
+            (data_item,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return {"texto": row[0], "selector": row[1], "hash": row[2]}
+
     def guardar_en_db(
         self,
         hash_pregunta: str,
         texto_pregunta: str,
         opcion_correcta: str,
         selector_correcto: str = "",
+        data_item: str = "",
         inmediato: bool = False,
     ) -> None:
         """
         Agrega al buffer en memoria. Si el buffer supera BUFFER_SIZE o
         se pide inserción inmediata, hace flush masivo.
         """
-        self._buffer.append((hash_pregunta, texto_pregunta, opcion_correcta, selector_correcto))
+        self._buffer.append((hash_pregunta, texto_pregunta, opcion_correcta, selector_correcto, data_item))
         if inmediato or len(self._buffer) >= BUFFER_SIZE:
             self.flush_buffer()
 
@@ -151,8 +185,8 @@ class DBManager:
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO respuestas
-                    (hash_pregunta, texto_pregunta, opcion_correcta, selector_correcto)
-                VALUES (?, ?, ?, ?)
+                    (hash_pregunta, texto_pregunta, opcion_correcta, selector_correcto, data_item)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 self._buffer,
             )

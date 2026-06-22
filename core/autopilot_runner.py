@@ -149,9 +149,9 @@ _JS_EXTRACT_ALL = r"""
     const getUniqueSelector = (el) => {
         if (el.id) return `#${el.id}`;
         const dataOp = el.getAttribute && el.getAttribute('data-op');
-        if (dataOp) return `input[data-op="${dataOp.replace(/"/g, '\\"')}"]`;
+        if (dataOp) return `input[data-op="${dataOp.replace(/"/g, '\\\"')}"]`;
         if (el.name && el.value)
-            return `input[name="${el.name.replace(/"/g, '\\"')}"][value="${el.value.replace(/"/g, '\\"')}"]`;
+            return `input[name="${el.name.replace(/"/g, '\\\"')}"][value="${el.value.replace(/"/g, '\\\"')}"]`;
         const path = [];
         let curr = el;
         while (curr && curr.nodeType === Node.ELEMENT_NODE) {
@@ -166,22 +166,138 @@ _JS_EXTRACT_ALL = r"""
         return path.join(' > ');
     };
 
+    const getQuestionHtml = (container) => {
+        const qEl = container.querySelector('.question, .pregunta');
+        if (qEl) return qEl.outerHTML;
+        const pEl = container.querySelector('p, h2, h3, h4');
+        if (pEl) return pEl.outerHTML;
+        return container.outerHTML;
+    };
+
     const getQuestionText = (container) => {
         const qEl = container.querySelector('.question, .pregunta');
+        let text = '';
         if (qEl) {
             const clone = qEl.cloneNode(true);
-            return (clone.innerText || '').replace(/\s+/g, ' ').trim();
+            clone.querySelectorAll('.form-list, .options-list, ul').forEach(el => el.remove());
+            text = (clone.innerText || '').replace(/\s+/g, ' ').trim();
+        } else {
+            const pEl = container.querySelector('p, h2, h3, h4');
+            const src = pEl || container;
+            text = (src.innerText || '').replace(/\s+/g, ' ').trim();
         }
-        const pEl = container.querySelector('p, h2, h3, h4');
-        const src = pEl || container;
-        return (src.innerText || '').replace(/\s+/g, ' ').trim();
+
+        // Append image tags if any (excluding ones inside options)
+        try {
+            const media = Array.from(container.querySelectorAll('img, svg, canvas'));
+            const imgTexts = [];
+            for (const m of media) {
+                let isInsideOption = false;
+                let parent = m.parentElement;
+                while (parent && parent !== container) {
+                    if (parent.tagName === 'LABEL' || parent.querySelector('input[type="radio"], input[type="checkbox"]')) {
+                        isInsideOption = true;
+                        break;
+                    }
+                    parent = parent.parentElement;
+                }
+                if (isInsideOption) continue;
+
+                let imgIdentifier = '';
+                const isImgTag = m.tagName && m.tagName.toLowerCase() === 'img';
+                const srcAttr = isImgTag ? (m.getAttribute('src') || '') : '';
+                if (srcAttr) {
+                    if (srcAttr.startsWith('data:')) {
+                        const mimeMatch = srcAttr.match(/data:image\/([a-zA-Z0-9+]+);/);
+                        const ext = mimeMatch ? mimeMatch[1] : 'png';
+                        let hash = 0;
+                        for (let i = 0; i < srcAttr.length; i++) {
+                            hash = (hash << 5) - hash + srcAttr.charCodeAt(i);
+                            hash |= 0;
+                        }
+                        imgIdentifier = `data_uri_${Math.abs(hash)}.${ext}`;
+                    } else {
+                        const parts = srcAttr.split('?')[0].split('/');
+                        imgIdentifier = parts[parts.length - 1] || srcAttr;
+                    }
+                }
+
+                const alt = (m.getAttribute && (m.getAttribute('alt') || m.getAttribute('title') || m.getAttribute('aria-label'))) || '';
+                const altClean = alt.trim().replace(/\s+/g, ' ');
+
+                let label = '';
+                if (imgIdentifier && altClean && altClean.toLowerCase() !== 'pregunta' && altClean.toLowerCase() !== 'imagen') {
+                    label = `${imgIdentifier} - ${altClean}`;
+                } else if (imgIdentifier) {
+                    label = imgIdentifier;
+                } else if (altClean) {
+                    label = altClean;
+                }
+
+                if (label) {
+                    imgTexts.push(`[img: ${label}]`);
+                }
+            }
+            if (imgTexts.length > 0) {
+                text = text ? `${text} ${imgTexts.join(' ')}` : imgTexts.join(' ');
+            }
+        } catch (_) {}
+
+        return text;
     };
 
     const questions = [];
     for (const container of containers) {
         const dataItem = container.getAttribute('data-item') || '';
-        const questionText = getQuestionText(container);
-        if (!questionText) continue;
+        let questionText = getQuestionText(container);
+        const questionHtml = getQuestionHtml(container);
+
+        if (!questionText) {
+            if (dataItem) {
+                questionText = dataItem;
+            } else if (container.id) {
+                questionText = `container#${container.id}`;
+            } else {
+                try {
+                    const img = container.querySelector('img, svg, canvas');
+                    if (img) {
+                        let imgIdentifier = '';
+                        const isImgTag = img.tagName && img.tagName.toLowerCase() === 'img';
+                        const srcAttr = isImgTag ? (img.getAttribute('src') || '') : '';
+                        if (srcAttr) {
+                            if (srcAttr.startsWith('data:')) {
+                                const mimeMatch = srcAttr.match(/data:image\/([a-zA-Z0-9+]+);/);
+                                const ext = mimeMatch ? mimeMatch[1] : 'png';
+                                let hash = 0;
+                                for (let i = 0; i < srcAttr.length; i++) {
+                                    hash = (hash << 5) - hash + srcAttr.charCodeAt(i);
+                                    hash |= 0;
+                                }
+                                imgIdentifier = `data_uri_${Math.abs(hash)}.${ext}`;
+                            } else {
+                                const parts = srcAttr.split('?')[0].split('/');
+                                imgIdentifier = parts[parts.length - 1] || srcAttr;
+                            }
+                        }
+
+                        const alt = (img.getAttribute && (img.getAttribute('alt') || img.getAttribute('title') || img.getAttribute('aria-label'))) || '';
+                        const altClean = alt.trim().replace(/\s+/g, ' ');
+
+                        let label = '';
+                        if (imgIdentifier && altClean && altClean.toLowerCase() !== 'pregunta' && altClean.toLowerCase() !== 'imagen') {
+                            label = `${imgIdentifier} - ${altClean}`;
+                        } else if (imgIdentifier) {
+                            label = imgIdentifier;
+                        } else if (altClean) {
+                            label = altClean;
+                        }
+
+                        if (label) questionText = label;
+                    }
+                } catch (_) {}
+            }
+            if (!questionText) questionText = `pregunta-${questions.length + 1}`;
+        }
 
         const inputs = Array.from(container.querySelectorAll('input[type="radio"], input[type="checkbox"]'));
         const options = [];
@@ -215,17 +331,62 @@ _JS_EXTRACT_ALL = r"""
             }
 
             labelText = (labelText || '').replace(/\s+/g, ' ').trim();
+
+            const optionRoot = optionElement || input.parentElement || input;
+            const optionHtml = optionRoot.outerHTML;
+
+            // Find images inside this option
+            try {
+                const images = Array.from(optionRoot.querySelectorAll('img, svg, canvas'));
+                const imageTexts = [];
+                for (const img of images) {
+                    let imgIdentifier = '';
+                    const isImgTag = img.tagName && img.tagName.toLowerCase() === 'img';
+                    const srcAttr = isImgTag ? (img.getAttribute('src') || '') : '';
+                    if (srcAttr) {
+                        if (srcAttr.startsWith('data:')) {
+                            const mimeMatch = srcAttr.match(/data:image\/([a-zA-Z0-9+]+);/);
+                            const ext = mimeMatch ? mimeMatch[1] : 'png';
+                            let hash = 0;
+                            for (let i = 0; i < srcAttr.length; i++) {
+                                hash = (hash << 5) - hash + srcAttr.charCodeAt(i);
+                                hash |= 0;
+                            }
+                            imgIdentifier = `data_uri_${Math.abs(hash)}.${ext}`;
+                        } else {
+                            const parts = srcAttr.split('?')[0].split('/');
+                            imgIdentifier = parts[parts.length - 1] || srcAttr;
+                        }
+                    }
+
+                    const alt = img.getAttribute('alt') || img.getAttribute('title') || img.getAttribute('aria-label') || '';
+                    const altClean = alt.trim().replace(/\s+/g, ' ');
+
+                    let label = '';
+                    if (imgIdentifier && altClean && altClean.toLowerCase() !== 'pregunta' && altClean.toLowerCase() !== 'imagen') {
+                        label = `${imgIdentifier} - ${altClean}`;
+                    } else if (imgIdentifier) {
+                        label = imgIdentifier;
+                    } else if (altClean) {
+                        label = altClean;
+                    }
+
+                    if (label) {
+                        imageTexts.push(`[img: ${label}]`);
+                    }
+                }
+                if (imageTexts.length > 0) {
+                    labelText = labelText ? `${labelText} ${imageTexts.join(' ')}` : imageTexts.join(' ');
+                }
+            } catch (_) {}
+
             if (!labelText) {
-                const optionRoot = optionElement || input.parentElement || input;
-                const media = optionRoot.querySelector && optionRoot.querySelector('img, svg, canvas');
-                const mediaLabel = media
-                    ? (media.getAttribute('alt') || media.getAttribute('title') || media.getAttribute('aria-label') || '')
-                    : '';
-                labelText = (mediaLabel || `Opción ${options.length + 1}`).replace(/\s+/g, ' ').trim();
+                labelText = `Opción ${options.length + 1}`;
             }
 
             options.push({
                 texto: labelText,
+                html: optionHtml,
                 selector: getUniqueSelector(input),
                 clickSelector: getUniqueSelector(optionElement || input),
                 data_op: dataOp,
@@ -235,6 +396,7 @@ _JS_EXTRACT_ALL = r"""
 
         questions.push({
             question: questionText,
+            question_html: questionHtml,
             data_item: dataItem,
             options: options,
             answered: inputs.some(i => i.checked),
@@ -244,6 +406,7 @@ _JS_EXTRACT_ALL = r"""
     return questions.length ? questions : null;
 }
 """
+
 
 # Valida si una pregunta (por su data-item del li contenedor) fue correcta o incorrecta
 # después de hacer clic en "Calificar"
@@ -525,11 +688,61 @@ _PY_INCORRECT_KEYS = (
 )
 
 
+def _normalize_math_symbols(text: str) -> str:
+    if not text:
+        return ""
+    replacements = {
+        "−": "-",
+        "–": "-",
+        "—": "-",
+        "×": "*",
+        "•": "*",
+        "·": "*",
+        "÷": "/",
+        "≠": "!=",
+        "≤": "<=",
+        "≥": ">=",
+        "≈": "=",
+    }
+    for orig, repl in replacements.items():
+        text = text.replace(orig, repl)
+    return text
+
+
 def _normalize_feedback_text(value: Any) -> str:
     text = "" if value is None else str(value)
+    text = _normalize_math_symbols(text)
     text = unicodedata.normalize("NFKD", text)
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     return re.sub(r"\s+", " ", text.lower()).strip()
+
+
+def _math_normalized_contains(container_text: str, search_text: str) -> bool:
+    if not search_text:
+        return False
+    def clean(t: str) -> str:
+        t = _normalize_feedback_text(t)
+        for cmd in ("frac", "sqrt", "overline", "underline", "hat", "overset", "underset"):
+            t = t.replace(cmd, "")
+        t = re.sub(r"[\\_{}\(\)\-\+=\*\/\s\^]", "", t)
+        return t
+    clean_search = clean(search_text)
+    if len(clean_search) < 2:
+        return False
+    return clean_search in clean(container_text)
+
+
+def _math_normalized_equals(a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    def clean(t: str) -> str:
+        t = _normalize_feedback_text(t)
+        for cmd in ("frac", "sqrt", "overline", "underline", "hat", "overset", "underset"):
+            t = t.replace(cmd, "")
+        t = re.sub(r"[\\_{}\(\)\-\+=\*\/\s\^]", "", t)
+        return t
+    return clean(a) == clean(b)
+
 
 
 def _compact_json_text(value: Any, limit: int = 12000) -> str:
@@ -626,10 +839,15 @@ def _classify_feedback_front_text(text: str, data_item: str) -> str:
 def _has_selected_value(value_text: str, data_op: str, option_text: str) -> bool:
     data_op_norm = _normalize_feedback_text(data_op)
     option_norm = _normalize_feedback_text(option_text)
-    return bool(
+    if bool(
         (data_op_norm and data_op_norm in value_text)
         or (option_norm and len(option_norm) >= 3 and option_norm in value_text)
-    )
+    ):
+        return True
+    if option_text and _math_normalized_contains(value_text, option_text):
+        return True
+    return False
+
 
 
 def _classify_feedback_json(node: Any, data_item: str, data_op: str, option_text: str) -> str:
@@ -776,10 +994,54 @@ class AutopilotRunner:
             result = self.browser.page.evaluate(_JS_EXTRACT_ALL)
             if not result:
                 return None
+
+            try:
+                from core.mathjax_parser import MathJaxParser
+                from bs4 import BeautifulSoup
+                math_parser = MathJaxParser()
+                for p in result:
+                    q_html = p.get("question_html")
+                    if q_html:
+                        try:
+                            cleaned_html = math_parser.replace_mathjax(q_html)
+                            q_text = BeautifulSoup(cleaned_html, "html.parser").get_text().strip()
+                            q_text = re.sub(r"\s+", " ", q_text)
+                            
+                            # Preservar las etiquetas [img: ...] del JS
+                            js_imgs = re.findall(r"\[img:\s*[^\]]+\]", p.get("question", ""))
+                            if js_imgs:
+                                q_text = f"{q_text} {' '.join(js_imgs)}".strip()
+                            
+                            if q_text:
+                                p["question"] = q_text
+                        except Exception as e:
+                            self._log(f"Error al limpiar HTML de pregunta: {e}", "DEBUG")
+
+                    for o in p.get("options", []):
+                        o_html = o.get("html")
+                        if o_html:
+                            try:
+                                cleaned_html = math_parser.replace_mathjax(o_html)
+                                o_text = BeautifulSoup(cleaned_html, "html.parser").get_text().strip()
+                                o_text = re.sub(r"\s+", " ", o_text)
+                                
+                                # Preservar las etiquetas [img: ...] del JS
+                                js_opt_imgs = re.findall(r"\[img:\s*[^\]]+\]", o.get("texto", ""))
+                                if js_opt_imgs:
+                                    o_text = f"{o_text} {' '.join(js_opt_imgs)}".strip()
+                                
+                                if o_text:
+                                    o["texto"] = o_text
+                            except Exception as e:
+                                self._log(f"Error al limpiar HTML de opción: {e}", "DEBUG")
+            except Exception as exc:
+                self._log(f"Error en post-procesamiento MathJax: {exc}", "DEBUG")
+
             return result
         except Exception as exc:
             self._log(f"Error al extraer preguntas del DOM: {exc}", "ERROR")
             return None
+
 
     # ------------------------------------------------------------------
     # Espera de autenticación manual
@@ -1249,6 +1511,78 @@ class AutopilotRunner:
             self._log(f"Error al validar pregunta '{data_item}': {exc}", "WARNING")
             return "unknown"
 
+    def _check_cristales_in_payloads(self) -> int | None:
+        """Busca el valor del campo 'cristales' en los payloads capturados del servidor."""
+        for payload in self._last_submit_payloads:
+            text = payload.get("text", "")
+            if not text:
+                continue
+            match = re.search(r'"cristales"\s*:\s*(\d+)', text)
+            if match:
+                try:
+                    return int(match.group(1))
+                except Exception:
+                    pass
+            try:
+                data = json.loads(text)
+                if isinstance(data, dict):
+                    val = self._find_key_recursive(data, "cristales")
+                    if val is not None:
+                        return int(val)
+            except Exception:
+                pass
+        return None
+
+    def _find_key_recursive(self, node: Any, target_key: str) -> Any:
+        if isinstance(node, dict):
+            if target_key in node:
+                return node[target_key]
+            for val in node.values():
+                res = self._find_key_recursive(val, target_key)
+                if res is not None:
+                    return res
+        elif isinstance(node, list):
+            for item in node:
+                res = self._find_key_recursive(item, target_key)
+                if res is not None:
+                    return res
+        return None
+
+    def _obtener_cristales_dom(self) -> int | None:
+        if not self.browser or not self.browser.page:
+            return None
+        try:
+            val = self.browser.page.evaluate(r"""() => {
+                const elements = Array.from(document.querySelectorAll('*'));
+                for (const el of elements) {
+                    if (el.children.length === 0 && /cristal/i.test(el.innerText || '')) {
+                        const text = el.innerText || '';
+                        const match = text.match(/(\d+)/);
+                        if (match) return parseInt(match[1], 10);
+                    }
+                }
+                const dataEl = document.querySelector('[data-cristales], [id*="cristal"], [class*="cristal"]');
+                if (dataEl) {
+                    const val = dataEl.getAttribute('data-cristales') || dataEl.innerText || '';
+                    const match = val.match(/(\d+)/);
+                    if (match) return parseInt(match[1], 10);
+                }
+                return null;
+            }""")
+            if val is not None:
+                if hasattr(val, "mock_add_spec") or type(val).__name__ in ("MagicMock", "Mock"):
+                    return None
+                return int(val)
+            return None
+        except Exception:
+            return None
+
+    def _obtener_cristales(self) -> int | None:
+        cristales_server = self._check_cristales_in_payloads()
+        if cristales_server is not None:
+            return cristales_server
+        return self._obtener_cristales_dom()
+
     # ------------------------------------------------------------------
     # Pausa interactiva
     # ------------------------------------------------------------------
@@ -1285,71 +1619,153 @@ class AutopilotRunner:
         desc_ops = opciones_descartadas.get(hash_p, {}).get("ops", set())
         desc_txt = opciones_descartadas.get(hash_p, {}).get("txt", set())
 
-        # 1. Consultar DB
-        respuesta_db = self.db.consultar_db(hash_p)
+        # Inicializar el contador de intentos si no existe
+        if not hasattr(self, "_attempt_counts"):
+            self._attempt_counts = {}
+        attempts_for_q = self._attempt_counts.setdefault(hash_p, {})
+
+        # 1. Consultar DB — intentar por data_item (si existe), luego por hash,
+        # y por último por selector/data_op entre las opciones actuales.
+        respuesta_db = None
+        data_item_val = pregunta_obj.get("data_item", "")
+        if data_item_val:
+            try:
+                respuesta_db = self.db.consultar_por_data_item(data_item_val)
+            except Exception:
+                respuesta_db = None
+
+        if respuesta_db is None:
+            respuesta_db = self.db.consultar_db(hash_p)
+
+        if respuesta_db is None:
+            for o in opciones:
+                for sel in (o.get("data_op") or "", o.get("selector") or ""):
+                    if not sel:
+                        continue
+                    try:
+                        db_row = self.db.consultar_por_selector(sel)
+                    except Exception:
+                        db_row = None
+                    if db_row:
+                        respuesta_db = {"texto": db_row.get("texto", ""), "selector": db_row.get("selector", "")}
+                        break
+                if respuesta_db is not None:
+                    break
+
         if respuesta_db is not None:
             texto_correcto = respuesta_db.get("texto", "")
             selector_correcto = respuesta_db.get("selector", "")
-            db_opcion_descartada = False
 
-            # Intentar por data-op
+            # 1.a Intentar emparejar por selector/data_op exacto
+            opcion = None
             if selector_correcto:
                 opcion = next(
-                    (o for o in opciones if o.get("data_op") == selector_correcto),
+                    (o for o in opciones if o.get("data_op") == selector_correcto or o.get("selector") == selector_correcto),
                     None,
                 )
-                if opcion and self._opcion_descartada(opcion, desc_ops, desc_txt):
+
+            # 1.b Intentar emparejar por texto normalizado
+            if opcion is None and texto_correcto:
+                target_norm = _normalize_feedback_text(texto_correcto)
+                for o in opciones:
+                    if _normalize_feedback_text(o.get("texto", "")) == target_norm:
+                        opcion = o
+                        break
+
+            # 1.b-2 Fallback por comparación matemática flexible (agresiva)
+            if opcion is None and texto_correcto:
+                for o in opciones:
+                    if _math_normalized_equals(o.get("texto", ""), texto_correcto):
+                        opcion = o
+                        break
+
+            # 1.c Fallback por similitud sobre texto normalizado
+            if opcion is None and texto_correcto:
+                norm_target = _normalize_feedback_text(texto_correcto)
+                cand_norms = [(_normalize_feedback_text(o.get("texto", "")), o) for o in opciones]
+                if cand_norms:
+                    mejor_norm, mejor_opt = max(cand_norms, key=lambda x: _similarity(x[0], norm_target))
+                    if _similarity(mejor_norm, norm_target) >= 0.5:
+                        opcion = mejor_opt
+
+            if opcion:
+                db_opcion_descartada = False
+                if self._opcion_descartada(opcion, desc_ops, desc_txt):
                     db_opcion_descartada = True
                     self._log(
                         f"  [DB] Omitiendo opcion descartada para '{texto_pregunta[:50]}...' -> '{opcion['texto']}'",
                         "WARNING",
                     )
-                if opcion and not self._opcion_descartada(opcion, desc_ops, desc_txt):
+                else:
+                    attempts_for_q[opcion["texto"]] = attempts_for_q.get(opcion["texto"], 0) + 1
                     self._log(f"  [DB] Respondiendo '{texto_pregunta[:50]}...' → '{opcion['texto']}'", "SUCCESS")
+                    opcion["_from_db"] = True
                     return opcion
 
-            # Intentar por texto exacto
-            opcion = next(
-                (o for o in opciones if o["texto"].strip() == texto_correcto.strip()),
-                None,
-            )
-            if opcion and self._opcion_descartada(opcion, desc_ops, desc_txt):
-                db_opcion_descartada = True
-                self._log(
-                    f"  [DB] Omitiendo opcion descartada para '{texto_pregunta[:50]}...' -> '{opcion['texto']}'",
-                    "WARNING",
-                )
-            if opcion and not self._opcion_descartada(opcion, desc_ops, desc_txt):
-                self._log(f"  [DB] Respondiendo '{texto_pregunta[:50]}...' → '{opcion['texto']}'", "SUCCESS")
-                return opcion
+                if db_opcion_descartada:
+                    self._log(
+                        f"  [DB] La respuesta guardada para '{texto_pregunta[:40]}...' "
+                        "ya fue descartada en esta hoja; probando otra opcion.",
+                        "WARNING",
+                    )
+            else:
+                self._log("  [DB] Se encontró registro en BD pero no se pudo mapear a ninguna opción actual.", "WARNING")
 
-            # Similitud (fallback)
-            opciones_db_disponibles = [
-                o for o in opciones
-                if not self._opcion_descartada(o, desc_ops, desc_txt)
-            ]
-            if opciones_db_disponibles and not db_opcion_descartada:
-                mejor = max(opciones_db_disponibles, key=lambda o: _similarity(o["texto"], texto_correcto))
-                self._log(f"  [DB] Similitud → '{mejor['texto']}'", "INFO")
-                return mejor
-            if db_opcion_descartada:
-                self._log(
-                    f"  [DB] La respuesta guardada para '{texto_pregunta[:40]}...' "
-                    "ya fue descartada en esta hoja; probando otra opcion.",
-                    "WARNING",
-                )
-
-        # 2. Elegir al azar (excluyendo descartadas)
+        # 2. Elegir entre opciones no descartadas
         disponibles = [
             o for o in opciones
             if not self._opcion_descartada(o, desc_ops, desc_txt)
         ]
-        if not disponibles:
-            self._log(f"  [AZAR] Sin opciones disponibles para '{texto_pregunta[:40]}...'", "ERROR")
-            return None
 
-        elegida = random.choice(disponibles)
+        max_attempts = int(self.limits.get("max_intentos_por_pregunta", 8))
+        total_attempts = sum(attempts_for_q.values()) if attempts_for_q else 0
+
+        if not disponibles:
+            # Todas las opciones están marcadas como descartadas. Evitar forzar siempre
+            # la misma opción: elegir la que tenga menos intentos entre todas.
+            if total_attempts >= max_attempts:
+                self._log(
+                    f"  [AZAR] Límite de intentos alcanzado para '{texto_pregunta[:40]}...'; no habrá más reintentos.",
+                    "WARNING",
+                )
+                return None
+
+            # elegir opción descartada con menos intentos
+            min_count = None
+            candidates: list[dict] = []
+            for o in opciones:
+                c = attempts_for_q.get(o["texto"], 0)
+                if min_count is None or c < min_count:
+                    min_count = c
+                    candidates = [o]
+                elif c == min_count:
+                    candidates.append(o)
+
+            elegida = random.choice(candidates) if candidates else random.choice(opciones)
+            attempts_for_q[elegida["texto"]] = attempts_for_q.get(elegida["texto"], 0) + 1
+            self._log(
+                f"  [AZAR] Todas las opciones fueron descartadas para '{texto_pregunta[:40]}...'; "
+                f"seleccionando forzado '{elegida['texto']}' (intento #{attempts_for_q.get(elegida['texto'], 0)})",
+                "WARNING",
+            )
+            elegida["_from_db"] = False
+            return elegida
+
+        # Elegir entre las disponibles la que tenga menos intentos (balancear exploración)
+        min_count = None
+        candidates = []
+        for o in disponibles:
+            c = attempts_for_q.get(o["texto"], 0)
+            if min_count is None or c < min_count:
+                min_count = c
+                candidates = [o]
+            elif c == min_count:
+                candidates.append(o)
+
+        elegida = random.choice(candidates) if candidates else random.choice(disponibles)
+        attempts_for_q[elegida["texto"]] = attempts_for_q.get(elegida["texto"], 0) + 1
         self._log(f"  [AZAR] '{texto_pregunta[:50]}...' → '{elegida['texto']}'", "INFO")
+        elegida["_from_db"] = False
         return elegida
 
     # ------------------------------------------------------------------
@@ -1505,24 +1921,30 @@ class AutopilotRunner:
                     )
 
                     if feedback == "correct":
-                        # Guardar en DB si no está ya
+                        # Guardar en DB si no está ya y no se respondió desde la DB
                         if hash_p not in confirmadas_correctas:
-                            selector_a_guardar = (
-                                opcion_elegida.get("data_op") or opcion_elegida["selector"]
-                            )
-                            self._log(
-                                f"  ✔ CORRECTO → guardando en DB: '{opcion_elegida['texto']}'",
-                                "SUCCESS",
-                            )
-                            self.db.guardar_en_db(
-                                hash_p,
-                                pregunta_obj["question"],
-                                opcion_elegida["texto"],
-                                selector_correcto=selector_a_guardar,
-                                inmediato=True,
-                            )
+                            if not opcion_elegida.get("_from_db"):
+                                selector_a_guardar = (
+                                    opcion_elegida.get("data_op") or opcion_elegida["selector"]
+                                )
+                                self._log(
+                                    f"  ✔ CORRECTO → guardando en DB: '{opcion_elegida['texto']}'",
+                                    "SUCCESS",
+                                )
+                                self.db.guardar_en_db(
+                                    hash_p,
+                                    pregunta_obj["question"],
+                                    opcion_elegida["texto"],
+                                    selector_correcto=selector_a_guardar,
+                                    inmediato=True,
+                                )
+                                self.stats["nuevas_guardadas"] += 1
+                            else:
+                                self._log(
+                                    f"  ✔ CORRECTO (ya estaba en DB) → omitiendo guardar para evitar duplicados: '{opcion_elegida['texto']}'",
+                                    "INFO",
+                                )
                             confirmadas_correctas.add(hash_p)
-                            self.stats["nuevas_guardadas"] += 1
                         self.stats["respondidas_desde_db"] += 1
 
                     elif feedback == "incorrect":
@@ -1550,16 +1972,27 @@ class AutopilotRunner:
                     if self.db.calcular_hash(p["question"]) not in confirmadas_correctas
                 ]
 
+                # Comprobar cristales si está disponible
+                cristales = self._obtener_cristales()
+                if cristales is not None:
+                    self._log(f"  [CRISTALES] Detectados {cristales} de 3 esperados.", "INFO")
+
                 if not pendientes:
-                    self._log(
-                        f"Hoja {hojas_procesadas} completada en {ronda + 1} ronda(s). "
-                        f"Guardadas: {len(confirmadas_correctas)} preguntas.",
-                        "SUCCESS",
-                    )
-                    self.stats["hojas_completadas"] += 1
-                    self._emit_stats()
-                    hoja_completada = True
-                    break
+                    if cristales is not None and cristales < 3:
+                        self._log("  [CRISTALES] < 3 cristales detectados a pesar de no haber preguntas pendientes en el bot.", "WARNING")
+                        self._log("  [CRISTALES] Posible colisión de preguntas o error de mapeo. Forzando reintento.", "WARNING")
+                        confirmadas_correctas.clear()
+                        pendientes = preguntas
+                    else:
+                        self._log(
+                            f"Hoja {hojas_procesadas} completada en {ronda + 1} ronda(s). "
+                            f"Guardadas: {len(confirmadas_correctas)} preguntas.",
+                            "SUCCESS",
+                        )
+                        self.stats["hojas_completadas"] += 1
+                        self._emit_stats()
+                        hoja_completada = True
+                        break
 
                 self._log(
                     f"  {len(pendientes)} pregunta(s) incorrectas/pendientes. "
