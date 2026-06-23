@@ -120,7 +120,8 @@ class VisionBotWidget(QWidget):
     def init_ui(self) -> None:
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.resize(420, 680)
+        # Smaller default size to keep the widget compact
+        self.resize(360, 560)
 
         # Style sheet (Obsidian glassmorphism, nice buttons)
         self.setStyleSheet("""
@@ -246,7 +247,8 @@ class VisionBotWidget(QWidget):
         self.main_container.setGraphicsEffect(shadow)
 
         layout = QVBoxLayout(self.main_container)
-        layout.setContentsMargins(15, 12, 15, 12)
+        # Slightly reduced margins for a more compact layout
+        layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(10)
 
         # Custom Title Bar
@@ -831,6 +833,27 @@ class VisionBotWidget(QWidget):
 
 
 if __name__ == "__main__":
+    # Enable High-DPI scaling and make the process DPI-aware on Windows
+    try:
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    except Exception:
+        pass
+
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            # Prefer SetProcessDpiAwareness if available, fallback to SetProcessDPIAware
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            except Exception:
+                try:
+                    ctypes.windll.user32.SetProcessDPIAware()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     app = QApplication(sys.argv)
     widget = VisionBotWidget()
     widget.show()
