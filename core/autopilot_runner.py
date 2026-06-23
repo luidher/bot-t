@@ -1086,7 +1086,28 @@ class AutopilotRunner:
                     "ERROR",
                 )
                 return False
-            time.sleep(poll_sec)
+
+            # Esperar de forma dirigida: preferir wait_for_selector si hay página,
+            # sino usar wait_for_timeout como fallback y finalmente time.sleep.
+            try:
+                if self.browser and self.browser.page:
+                    sel = self.ap_cfg.get("selectors", {}).get("question_container")
+                    if sel:
+                        try:
+                            self.browser.page.wait_for_selector(sel, timeout=int(poll_sec * 1000))
+                        except Exception:
+                            # No encontrado en el tiempo dado, continuar el bucle.
+                            pass
+                    else:
+                        try:
+                            self.browser.page.wait_for_timeout(int(poll_sec * 1000))
+                        except Exception:
+                            time.sleep(poll_sec)
+                else:
+                    time.sleep(poll_sec)
+            except Exception:
+                # En casos raros de error de Playwright, caer a sleep seguro.
+                time.sleep(poll_sec)
 
         return False
 
@@ -1131,7 +1152,18 @@ class AutopilotRunner:
                 }""",
                 selector,
             )
-            time.sleep(self.timings.get("after_click_wait_ms", 600) / 1000)
+            # Espera dirigida tras el click: preferir wait_for_timeout si hay página
+            wait_ms = int(self.timings.get("after_click_wait_ms", 600))
+            try:
+                if self.browser and self.browser.page:
+                    try:
+                        self.browser.page.wait_for_timeout(wait_ms)
+                    except Exception:
+                        pass
+                else:
+                    time.sleep(wait_ms / 1000)
+            except Exception:
+                time.sleep(wait_ms / 1000)
             return bool(clicked)
         except Exception as exc:
             self._log(f"Error JS click '{selector}': {exc}", "DEBUG")
@@ -1143,7 +1175,17 @@ class AutopilotRunner:
         for click_kwargs in ({}, {"force": True}):
             try:
                 self.browser.page.click(selector, timeout=5000, **click_kwargs)
-                time.sleep(self.timings.get("after_click_wait_ms", 600) / 1000)
+                wait_ms = int(self.timings.get("after_click_wait_ms", 600))
+                try:
+                    if self.browser and self.browser.page:
+                        try:
+                            self.browser.page.wait_for_timeout(wait_ms)
+                        except Exception:
+                            pass
+                    else:
+                        time.sleep(wait_ms / 1000)
+                except Exception:
+                    time.sleep(wait_ms / 1000)
                 return True
             except Exception:
                 continue
@@ -1155,7 +1197,17 @@ class AutopilotRunner:
         try:
             clicked = self.browser.page.evaluate(_JS_CLICK_BY_TEXT, text_hint)
             if clicked:
-                time.sleep(self.timings.get("after_click_wait_ms", 600) / 1000)
+                wait_ms = int(self.timings.get("after_click_wait_ms", 600))
+                try:
+                    if self.browser and self.browser.page:
+                        try:
+                            self.browser.page.wait_for_timeout(wait_ms)
+                        except Exception:
+                            pass
+                    else:
+                        time.sleep(wait_ms / 1000)
+                except Exception:
+                    time.sleep(wait_ms / 1000)
             return bool(clicked)
         except Exception as exc:
             self._log(f"Error JS click por texto '{text_hint}': {exc}", "DEBUG")
@@ -1300,13 +1352,23 @@ class AutopilotRunner:
             response_handler = self._start_submit_response_capture()
             ok = self._click_selector_with_fallback(found)
             if ok:
-                wait_ms = self.timings.get("after_submit_wait_ms", 2000)
+                wait_ms = int(self.timings.get("after_submit_wait_ms", 2000))
                 self._log(f"'Calificar' presionado. Esperando {wait_ms}ms para feedback...", "INFO")
-                time.sleep(wait_ms / 1000)
                 try:
-                    self.browser.page.wait_for_load_state("networkidle", timeout=3000)
+                    if self.browser and self.browser.page:
+                        try:
+                            # Esperar a que la red esté inactiva o, como mínimo, esperar el timeout
+                            self.browser.page.wait_for_timeout(wait_ms)
+                        except Exception:
+                            pass
+                        try:
+                            self.browser.page.wait_for_load_state("networkidle", timeout=3000)
+                        except Exception:
+                            pass
+                    else:
+                        time.sleep(wait_ms / 1000)
                 except Exception:
-                    pass
+                    time.sleep(wait_ms / 1000)
                 self._finish_submit_response_capture(response_handler)
                 return True
             self._finish_submit_response_capture(response_handler)
@@ -1324,22 +1386,40 @@ class AutopilotRunner:
             self._log("Botón 'Intenta de nuevo' encontrado. Haciendo clic...", "INFO")
             ok = self._click_selector_with_fallback(found)
             if ok:
-                wait_ms = self.timings.get("reload_wait_ms", 2500)
-                time.sleep(wait_ms / 1000)
+                wait_ms = int(self.timings.get("reload_wait_ms", 2500))
                 try:
-                    self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                    if self.browser and self.browser.page:
+                        try:
+                            self.browser.page.wait_for_timeout(wait_ms)
+                        except Exception:
+                            pass
+                        try:
+                            self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                        except Exception:
+                            pass
+                    else:
+                        time.sleep(wait_ms / 1000)
                 except Exception:
-                    pass
+                    time.sleep(wait_ms / 1000)
                 return True
 
         for text_hint in ["Intenta de nuevo", "Reintentar", "Intentar de nuevo", "Try again"]:
             if self._click_by_visible_text(text_hint):
-                wait_ms = self.timings.get("reload_wait_ms", 2500)
-                time.sleep(wait_ms / 1000)
+                wait_ms = int(self.timings.get("reload_wait_ms", 2500))
                 try:
-                    self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                    if self.browser and self.browser.page:
+                        try:
+                            self.browser.page.wait_for_timeout(wait_ms)
+                        except Exception:
+                            pass
+                        try:
+                            self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                        except Exception:
+                            pass
+                    else:
+                        time.sleep(wait_ms / 1000)
                 except Exception:
-                    pass
+                    time.sleep(wait_ms / 1000)
                 self._log(f"Reintentando con botón '{text_hint}'.", "INFO")
                 return True
 
@@ -1347,7 +1427,21 @@ class AutopilotRunner:
         self._log("Botón 'Intenta de nuevo' no encontrado. Recargando página...", "WARNING")
         try:
             self.browser.page.reload(timeout=self._pw_timeout_ms, wait_until="load")
-            time.sleep(self.timings.get("reload_wait_ms", 2500) / 1000)
+            wait_ms = int(self.timings.get("reload_wait_ms", 2500))
+            try:
+                if self.browser and self.browser.page:
+                    try:
+                        self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                    except Exception:
+                        pass
+                    try:
+                        self.browser.page.wait_for_timeout(wait_ms)
+                    except Exception:
+                        pass
+                else:
+                    time.sleep(wait_ms / 1000)
+            except Exception:
+                time.sleep(wait_ms / 1000)
             return True
         except Exception as exc:
             self._log(f"Error al recargar: {exc}", "ERROR")
@@ -1364,12 +1458,21 @@ class AutopilotRunner:
             self._log("Botón 'Siguiente' encontrado. Avanzando...", "INFO")
             ok = self._click_selector_with_fallback(found)
             if ok:
-                wait_ms = self.timings.get("next_wait_ms", 3000)
-                time.sleep(wait_ms / 1000)
+                wait_ms = int(self.timings.get("next_wait_ms", 3000))
                 try:
-                    self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                    if self.browser and self.browser.page:
+                        try:
+                            self.browser.page.wait_for_timeout(wait_ms)
+                        except Exception:
+                            pass
+                        try:
+                            self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                        except Exception:
+                            pass
+                    else:
+                        time.sleep(wait_ms / 1000)
                 except Exception:
-                    pass
+                    time.sleep(wait_ms / 1000)
 
                 # Comprobar si la navegación llevó inesperadamente al buscador
                 try:
@@ -1390,12 +1493,21 @@ class AutopilotRunner:
 
                         for text_hint in ["Siguiente", "Next", "Continuar", "Submit", "Enviar"]:
                             if self._click_by_visible_text(text_hint):
-                                wait_ms = self.timings.get("next_wait_ms", 3000)
-                                time.sleep(wait_ms / 1000)
+                                wait_ms = int(self.timings.get("next_wait_ms", 3000))
                                 try:
-                                    self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                                    if self.browser and self.browser.page:
+                                        try:
+                                            self.browser.page.wait_for_timeout(wait_ms)
+                                        except Exception:
+                                            pass
+                                        try:
+                                            self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                                        except Exception:
+                                            pass
+                                    else:
+                                        time.sleep(wait_ms / 1000)
                                 except Exception:
-                                    pass
+                                    time.sleep(wait_ms / 1000)
                                 self._log(f"Avanzado con botón '{text_hint}'.", "SUCCESS")
                                 return True
 
@@ -1407,12 +1519,21 @@ class AutopilotRunner:
 
         for text_hint in ["Siguiente", "Next", "Continuar", "Submit", "Enviar"]:
             if self._click_by_visible_text(text_hint):
-                wait_ms = self.timings.get("next_wait_ms", 3000)
-                time.sleep(wait_ms / 1000)
+                wait_ms = int(self.timings.get("next_wait_ms", 3000))
                 try:
-                    self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                    if self.browser and self.browser.page:
+                        try:
+                            self.browser.page.wait_for_timeout(wait_ms)
+                        except Exception:
+                            pass
+                        try:
+                            self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                        except Exception:
+                            pass
+                    else:
+                        time.sleep(wait_ms / 1000)
                 except Exception:
-                    pass
+                    time.sleep(wait_ms / 1000)
                 self._log(f"Avanzado con botón '{text_hint}'.", "SUCCESS")
                 return True
 
@@ -1840,7 +1961,28 @@ class AutopilotRunner:
                     break
 
                 # ── A. Extraer todas las preguntas ──────────────────────────
-                time.sleep(self.timings.get("dom_stable_wait_ms", 700) / 1000)
+                # Espera dirigida para que el DOM se estabilice: preferir
+                # wait_for_selector si hay página, sino fallback a wait_for_timeout.
+                dom_wait_ms = int(self.timings.get("dom_stable_wait_ms", 700))
+                try:
+                    if self.browser and self.browser.page:
+                        sel = self.ap_cfg.get("selectors", {}).get("question_container")
+                        if sel:
+                            try:
+                                self.browser.page.wait_for_selector(sel, timeout=dom_wait_ms)
+                            except Exception:
+                                # No encontrado en tiempo, continuar de todas formas
+                                pass
+                        else:
+                            try:
+                                self.browser.page.wait_for_timeout(dom_wait_ms)
+                            except Exception:
+                                pass
+                    else:
+                        time.sleep(dom_wait_ms / 1000)
+                except Exception:
+                    time.sleep(dom_wait_ms / 1000)
+
                 preguntas = self._extraer_todas_las_preguntas()
 
                 if not preguntas:
@@ -1894,8 +2036,22 @@ class AutopilotRunner:
                     confirmadas_correctas.clear()
                     # Vaciar historial de rondas detectadas para evitar bucle infinito
                     self._recent_pending_hashes.clear()
-                    # Pequeña espera para que la recarga surta efecto
-                    time.sleep(self.timings.get("reload_wait_ms", 2500) / 1000)
+                    # Pequeña espera para que la recarga surta efecto (espera dirigida)
+                    reload_wait_ms = int(self.timings.get("reload_wait_ms", 2500))
+                    try:
+                        if self.browser and self.browser.page:
+                            try:
+                                self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                            except Exception:
+                                pass
+                            try:
+                                self.browser.page.wait_for_timeout(reload_wait_ms)
+                            except Exception:
+                                pass
+                        else:
+                            time.sleep(reload_wait_ms / 1000)
+                    except Exception:
+                        time.sleep(reload_wait_ms / 1000)
                     # Tras recargar, continuar con la siguiente iteración (re-extraer)
                     continue
 
@@ -1944,7 +2100,19 @@ class AutopilotRunner:
                 if not calificado:
                     self._log("No se pudo presionar 'Calificar'. Reintentando en la siguiente ronda.", "WARNING")
                     # Esperar y continuar (quizá el botón aparezca)
-                    time.sleep(self.timings.get("feedback_wait_ms", 1500) / 1000)
+                    fb_wait_ms = int(self.timings.get("feedback_wait_ms", 1500))
+                    try:
+                        if self.browser and self.browser.page:
+                            try:
+                                self.browser.page.wait_for_timeout(fb_wait_ms)
+                            except Exception:
+                                pass
+                        else:
+                            time.sleep(fb_wait_ms / 1000)
+                    except Exception:
+                        time.sleep(fb_wait_ms / 1000)
+                    
+                    continue
                     continue
 
                 # ── D. Leer feedback del DOM ────────────────────────────────
