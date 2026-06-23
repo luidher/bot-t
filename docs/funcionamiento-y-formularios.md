@@ -50,24 +50,18 @@ C:\Program Files\Tesseract-OCR\tesseract.exe
 
 ```powershell
 ollama pull llama3.1
-```
 
 - Dependencias del proyecto instaladas:
 
 ```powershell
 cd C:\Users\luidh\Desktop\proyectos\BOT\vision-bot
-.\venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
 ```
-
 ## Como debe verse el formulario
-
 El bot esta preparado principalmente para preguntas con opciones. Para que OCR y
 clic funcionen bien, el formulario deberia mostrar algo parecido a esto:
 
 ```text
-Capital de Francia?
 A) Madrid
 B) Paris
 C) Roma
