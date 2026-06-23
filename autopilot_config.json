@@ -80,7 +80,8 @@
     "limits": {
         "max_sheets":                   10000,
         "max_intentos_por_pregunta":    8,
-        "max_rondas_por_hoja":          20
+        "max_rondas_por_hoja":          20,
+        "loop_detection_rounds":        3
     },
     "browser": {
         "keep_open": false,

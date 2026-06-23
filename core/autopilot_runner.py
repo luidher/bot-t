@@ -106,6 +106,10 @@ def _load_autopilot_config() -> dict[str, Any]:
             "max_sheets": 10000,
             "max_intentos_por_pregunta": 8,
             "max_rondas_por_hoja": 20,
+            # Número de rondas idénticas a considerar para detectar un posible bucle
+            # (mismo conjunto de preguntas pendientes sin progreso). Si se supera,
+            # el bot recargará la página y limpiará los descartes para reintentar.
+            "loop_detection_rounds": 3,
         },
     }
     if not AUTOPILOT_CONFIG_FILE.exists():
@@ -950,6 +954,10 @@ class AutopilotRunner:
             "nuevas_guardadas": 0,
             "hojas_completadas": 0,
         }
+
+        # Conjunto de preguntas que deben ser saltadas en la hoja actual
+        # (permite que tests o control externo marquen preguntas fallidas)
+        self.failed_questions_in_sheet: set[str] = set()
 
         self._running = False
         self._paused = False
@@ -1849,6 +1857,48 @@ class AutopilotRunner:
                     "INFO",
                 )
 
+                # Detectar posible bucle: si en varias rondas consecutivas el
+                # conjunto de preguntas pendientes (por hash) no cambia, asumimos
+                # que estamos en un bucle y tomamos medidas (recargar y limpiar descartes).
+                loop_thresh = int(self.limits.get("loop_detection_rounds", 3))
+                if not hasattr(self, "_recent_pending_hashes"):
+                    self._recent_pending_hashes = []  # lista de listas (round -> set(hashes))
+                current_pending_hashes = [self.db.calcular_hash(p["question"]) for p in preguntas]
+                self._recent_pending_hashes.append(set(current_pending_hashes))
+                # Mantener solo las últimas `loop_thresh` rondas
+                if len(self._recent_pending_hashes) > loop_thresh:
+                    self._recent_pending_hashes.pop(0)
+                if (
+                    len(self._recent_pending_hashes) == loop_thresh
+                    and all(h == self._recent_pending_hashes[0] for h in self._recent_pending_hashes[1:])
+                ):
+                    # Estamos en bucle: recargar página y limpiar descartes para
+                    # intentar desde cero en esta hoja.
+                    self._log(
+                        f"Posible bucle detectado tras {loop_thresh} rondas idénticas. Recargando y limpiando descartes...",
+                        "WARNING",
+                    )
+                    try:
+                        # Recargar la página
+                        self.browser.page.reload(timeout=self._pw_timeout_ms, wait_until="load")
+                    except Exception:
+                        try:
+                            self.browser.page.evaluate("location.reload()")
+                        except Exception:
+                            pass
+                    # Limpiar descartes y resetear contadores de intentos para esta hoja
+                    opciones_descartadas.clear()
+                    if hasattr(self, "_attempt_counts"):
+                        self._attempt_counts.clear()
+                    # También borrar confirmadas para forzar re-evaluación
+                    confirmadas_correctas.clear()
+                    # Vaciar historial de rondas detectadas para evitar bucle infinito
+                    self._recent_pending_hashes.clear()
+                    # Pequeña espera para que la recarga surta efecto
+                    time.sleep(self.timings.get("reload_wait_ms", 2500) / 1000)
+                    # Tras recargar, continuar con la siguiente iteración (re-extraer)
+                    continue
+
                 # ── B. Responder preguntas (las no confirmadas aún) ─────────
                 preguntas_a_responder = [
                     p for p in preguntas
@@ -2080,11 +2130,42 @@ class AutopilotRunner:
         sin_responder = [p for p in preguntas if not p.get("answered")]
         if not sin_responder:
             return None
-        p = sin_responder[0]
+
+        # Normalizar conjunto de preguntas fallidas marcado externamente
+        failed_norms = set()
+        try:
+            failed_norms = { _normalize_feedback_text(x) for x in (self.failed_questions_in_sheet or set()) }
+        except Exception:
+            failed_norms = set()
+
+        # Buscar la primera pregunta sin responder que no esté marcada como fallida
+        selected = None
+        for p in sin_responder:
+            raw_q = p.get("question", "") or ""
+            # Eliminar tags JS tipo [img: ...] que pueden añadirse al final
+            cleaned_q = re.sub(r"\[img:\s*[^\]]+\]", "", raw_q).strip()
+            if _normalize_feedback_text(cleaned_q) in failed_norms:
+                continue
+            selected = p
+            # Reemplazar el texto en el objeto por la versión limpia
+            selected = dict(selected)
+            selected["question"] = cleaned_q
+            break
+
+        if not selected:
+            # Si todo está marcado como fallido, devolver la primera sin responder (limpiada)
+            p = sin_responder[0]
+            cleaned_q = re.sub(r"\[img:\s*[^\]]+\]", "", (p.get("question", "") or "")).strip()
+            return [{
+                "question": cleaned_q,
+                "options": p["options"],
+                "data_item": p.get("data_item", ""),
+            }]
+
         return [{
-            "question": p["question"],
-            "options": p["options"],
-            "data_item": p.get("data_item", ""),
+            "question": selected["question"],
+            "options": selected["options"],
+            "data_item": selected.get("data_item", ""),
         }]
 
     def recargar_hoja_actual(self) -> bool:
