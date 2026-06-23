@@ -70,7 +70,8 @@ class AutopilotApp:
         self.root = root
         self.root.title("Autopilot DB — Standalone")
         self.root.configure(bg=COLORS["bg"])
-        self.root.minsize(780, 600)
+        # Allow a smaller minimum size for a more compact UI
+        self.root.minsize(640, 480)
         self.root.resizable(True, True)
 
         # Estado interno
@@ -83,12 +84,13 @@ class AutopilotApp:
         self._stats: dict = {}
 
         # Fuentes
-        self._font_title  = tkfont.Font(family="Segoe UI", size=15, weight="bold")
-        self._font_label  = tkfont.Font(family="Segoe UI", size=10)
-        self._font_small  = tkfont.Font(family="Segoe UI", size=9)
-        self._font_log    = tkfont.Font(family="Consolas", size=9)
-        self._font_btn    = tkfont.Font(family="Segoe UI", size=10, weight="bold")
-        self._font_stats  = tkfont.Font(family="Segoe UI", size=9)
+        # Slightly smaller fonts for a compact layout
+        self._font_title  = tkfont.Font(family="Segoe UI", size=13, weight="bold")
+        self._font_label  = tkfont.Font(family="Segoe UI", size=9)
+        self._font_small  = tkfont.Font(family="Segoe UI", size=8)
+        self._font_log    = tkfont.Font(family="Consolas", size=8)
+        self._font_btn    = tkfont.Font(family="Segoe UI", size=9, weight="bold")
+        self._font_stats  = tkfont.Font(family="Segoe UI", size=8)
 
         self._build_ui()
         self._poll_log_queue()
@@ -99,7 +101,8 @@ class AutopilotApp:
 
     def _build_ui(self) -> None:
         # ── Header ───────────────────────────────────────────────────────
-        header = tk.Frame(self.root, bg=COLORS["surface"], pady=14, padx=20)
+        # Reduced header padding for compactness
+        header = tk.Frame(self.root, bg=COLORS["surface"], pady=10, padx=12)
         header.pack(fill="x", side="top")
 
         tk.Label(
@@ -135,7 +138,7 @@ class AutopilotApp:
             bg=COLORS["surface"], fg=COLORS["text"],
             insertbackground=COLORS["text"],
             relief="flat", bd=6,
-            width=55,
+            width=45,
         )
         self._entry_url.grid(row=0, column=1, sticky="ew", padx=(0, 12))
         cfg_frame.columnconfigure(1, weight=1)
@@ -146,7 +149,7 @@ class AutopilotApp:
             font=self._font_btn,
             bg=COLORS["accent"], fg="white",
             activebackground=COLORS["accent_dark"], activeforeground="white",
-            relief="flat", bd=0, padx=14, pady=6,
+            relief="flat", bd=0, padx=12, pady=5,
             cursor="hand2",
             command=self._on_open_browser,
         )
@@ -215,7 +218,7 @@ class AutopilotApp:
 
         for col, (key, label) in enumerate(labels.items()):
             cell = tk.Frame(stats_frame, bg=COLORS["surface"])
-            cell.grid(row=0, column=col, padx=18, pady=4, sticky="ew")
+            cell.grid(row=0, column=col, padx=12, pady=4, sticky="ew")
             stats_frame.columnconfigure(col, weight=1)
 
             tk.Label(
@@ -437,13 +440,28 @@ class AutopilotApp:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # Enable High-DPI awareness on Windows before creating the Tk root
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            except Exception:
+                try:
+                    ctypes.windll.user32.SetProcessDPIAware()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     root = tk.Tk()
     app = AutopilotApp(root)
     root.protocol("WM_DELETE_WINDOW", app._on_close)
 
     # Centrar ventana en pantalla
     root.update_idletasks()
-    w, h = 900, 680
+    # Use a smaller default geometry for a compact window
+    w, h = 760, 540
     sw = root.winfo_screenwidth()
     sh = root.winfo_screenheight()
     root.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
