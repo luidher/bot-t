@@ -13,6 +13,7 @@ from core.autopilot_runner import (
     AutopilotRunner,
     _classify_feedback_front,
     _classify_feedback_front_text,
+    _classify_feedback_words,
     _similarity,
 )
 
@@ -104,6 +105,11 @@ class TestAutopilotRunnerHelpers(unittest.TestCase):
         self.assertEqual(_similarity("la capital de francia", "Francia Capital de la"), 1.0)
         self.assertEqual(_similarity("capital de francia", "capital de españa"), 0.5)
         self.assertEqual(_similarity("", "algo"), 0.0)
+
+    def test_classify_feedback_words_uses_word_boundaries(self) -> None:
+        self.assertEqual(_classify_feedback_words("normal"), "unknown")
+        self.assertEqual(_classify_feedback_words("incorrecto"), "incorrect")
+        self.assertEqual(_classify_feedback_words("correcto"), "correct")
 
     def test_classify_server_front_feedback(self) -> None:
         payload = {
@@ -384,6 +390,47 @@ class TestAutopilotRunnerMockFlows(unittest.TestCase):
         self.assertEqual(runner.stats["nuevas_guardadas"], 0)
         self.assertEqual(runner.stats["respondidas_desde_db"], 1)
         
+        runner.db.close()
+
+    def test_runner_does_not_discard_option_on_failed_click(self) -> None:
+        mock_browser = MagicMock()
+        mock_browser.page = MagicMock()
+
+        runner = AutopilotRunner("http://test.com", bot_config={}, keep_browser_open=False, browser=mock_browser)
+        runner.db.close()
+        runner.db = DBManager(self.db_path)
+        runner.timings.update({
+            "dom_stable_wait_ms": 0,
+            "feedback_wait_ms": 0,
+            "after_click_wait_ms": 0,
+            "after_submit_wait_ms": 0,
+            "reload_wait_ms": 0,
+            "next_wait_ms": 0,
+        })
+        runner.limits["max_sheets"] = 1
+        runner.limits["max_rondas_por_hoja"] = 1
+
+        question = {
+            "question": "Pregunta de prueba",
+            "data_item": "id-q",
+            "answered": False,
+            "options": [
+                {"texto": "Opción A", "selector": "#a", "data_op": "a"},
+            ],
+        }
+        runner._extraer_todas_las_preguntas = MagicMock(return_value=[question])
+        runner._hacer_clic_en_opcion = MagicMock(return_value=False)
+        runner._presionar_calificar = MagicMock(return_value=False)
+        runner._presionar_reintentar = MagicMock(return_value=False)
+        runner.ir_a_siguiente_hoja = MagicMock(return_value=False)
+
+        with MagicMock() as mock_registrar:
+            runner._registrar_descarte = mock_registrar
+            runner.run()
+
+        self.assertEqual(runner._hacer_clic_en_opcion.call_count, 1)
+        mock_registrar.assert_not_called()
+
         runner.db.close()
 
     def test_runner_retries_only_pending_before_next_sheet(self) -> None:
