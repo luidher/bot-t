@@ -143,6 +143,35 @@ class AutopilotApp:
         self._entry_url.grid(row=0, column=1, sticky="ew", padx=(0, 12))
         cfg_frame.columnconfigure(1, weight=1)
 
+        # Selector de tipo de navegador
+        self._var_browser = tk.StringVar(value="Chromium")
+        browser_options = ["Chromium", "Chrome", "Firefox"]
+
+        # Estilo del OptionMenu: texto + flecha
+        browser_menu_btn = tk.OptionMenu(
+            cfg_frame,
+            self._var_browser,
+            *browser_options,
+        )
+        browser_menu_btn.config(
+            font=self._font_small,
+            bg=COLORS["surface2"], fg=COLORS["text"],
+            activebackground=COLORS["surface"], activeforeground=COLORS["text"],
+            highlightthickness=0,
+            relief="flat",
+            bd=0,
+            padx=8, pady=5,
+            cursor="hand2",
+            indicatoron=True,
+        )
+        browser_menu_btn["menu"].config(
+            bg=COLORS["surface2"], fg=COLORS["text"],
+            activebackground=COLORS["accent"], activeforeground="white",
+            relief="flat",
+        )
+        self._browser_menu_btn = browser_menu_btn
+        browser_menu_btn.grid(row=0, column=2, padx=(0, 4))
+
         # Botón Abrir Navegador
         self._btn_open = tk.Button(
             cfg_frame, text="🌐  Abrir Navegador",
@@ -153,7 +182,7 @@ class AutopilotApp:
             cursor="hand2",
             command=self._on_open_browser,
         )
-        self._btn_open.grid(row=0, column=2, padx=(0, 8))
+        self._btn_open.grid(row=0, column=3, padx=(0, 8))
 
         # ── Fila de botones de control ────────────────────────────────────
         btn_frame = tk.Frame(self.root, bg=COLORS["bg"], padx=20, pady=12)
@@ -274,18 +303,23 @@ class AutopilotApp:
             return
 
         self._btn_open.config(state="disabled", text="Abriendo...")
+        self._browser_menu_btn.config(state="disabled")
         self._set_status("Abriendo navegador...", COLORS["warning"])
         self._browser_cmd_queue = queue.Queue()
         self._closing = False
 
+        # Mapear nombre de UI al identificador interno de BotBrowser
+        _browser_type_map = {"Chromium": "chromium", "Chrome": "chrome", "Firefox": "firefox"}
+        browser_type = _browser_type_map.get(self._var_browser.get(), "chromium")
+
         self._runner_thread = threading.Thread(
             target=self._browser_worker,
-            args=(url, self._browser_cmd_queue),
+            args=(url, self._browser_cmd_queue, browser_type),
             daemon=True,
         )
         self._runner_thread.start()
 
-    def _browser_worker(self, url: str, cmd_queue: queue.Queue) -> None:
+    def _browser_worker(self, url: str, cmd_queue: queue.Queue, browser_type: str = "chromium") -> None:
         """
         Mantiene Playwright, el navegador y el Autopilot en el mismo thread.
 
@@ -295,10 +329,11 @@ class AutopilotApp:
         """
         browser: BotBrowser | None = None
         try:
-            browser = BotBrowser(headless=False)
+            browser = BotBrowser(headless=False, browser_type=browser_type)
             browser.open(url, timeout_ms=120000)
             self._browser = browser
-            self._log_queue.put(("INFO", "Navegador abierto. Haz login y luego presiona 'Iniciar Autopilot'."))
+            browser_label = browser_type.capitalize()
+            self._log_queue.put(("INFO", f"Navegador ({browser_label}) abierto. Haz login y luego presiona 'Iniciar Autopilot'."))
             self._ui_after(self._on_browser_ready)
 
             while True:
@@ -312,6 +347,7 @@ class AutopilotApp:
             self._log_queue.put(("ERROR", f"Error al abrir el navegador: {exc}"))
             self._ui_after(lambda: (
                 self._btn_open.config(state="normal", text="🌐  Abrir Navegador"),
+                self._browser_menu_btn.config(state="normal"),
                 self._set_status("Error al abrir", COLORS["error"]),
             ))
         finally:
@@ -386,6 +422,7 @@ class AutopilotApp:
             self._btn_open.config(state="disabled", text="Navegador abierto")
         else:
             self._btn_open.config(state="normal", text="🌐  Abrir Navegador")
+            self._browser_menu_btn.config(state="normal")
         self._set_status("● Inactivo", COLORS["text_muted"])
 
     # ------------------------------------------------------------------

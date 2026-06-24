@@ -4,6 +4,12 @@ This module adds an option to reuse a single Playwright browser process
 in-process and create a fresh context/page per `BotBrowser` instance. Reusing
 the browser process reduces memory consumption when multiple runner instances
 exist within the same Python process.
+
+Supported browser types via the ``browser_type`` parameter:
+  - ``"chromium"`` (default) — Playwright's bundled Chromium.
+  - ``"chrome"``             — Google Chrome installed on the system
+                               (launched via Playwright's ``channel="chrome"`` option).
+  - ``"firefox"``            — Mozilla Firefox launched by Playwright.
 """
 from __future__ import annotations
 from pathlib import Path
@@ -12,17 +18,35 @@ from threading import Lock
 from typing import Any, Dict, List, Optional
 from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
 
+# Valid browser type identifiers accepted by BotBrowser.
+BROWSER_TYPES = ("chromium", "chrome", "firefox")
+
 
 class BotBrowser:
-    # Shared (process-wide) Playwright/browser instances and simple refcount
-    # to allow multiple BotBrowser instances to create lightweight contexts
-    # while sharing the underlying Chromium process.
+    # Shared (process-wide) Playwright instance and per-browser-type pools.
+    # Each entry in _shared_browsers / _shared_refcounts is keyed by browser_type
+    # so that chromium, chrome, and firefox can coexist independently.
     _shared_playwright = None
-    _shared_browser: Optional[Browser] = None
-    _shared_refcount: int = 0
+    _shared_browsers: Dict[str, Browser] = {}
+    _shared_refcounts: Dict[str, int] = {}
     _shared_lock = Lock()
 
-    def __init__(self, headless: bool = False, use_shared_browser: bool = True) -> None:
+    # ── Back-compat class attributes (kept so external code that references
+    #    BotBrowser._shared_browser / _shared_refcount still works) ──────────
+    @classmethod
+    def _get_shared_browser(cls, browser_type: str) -> Optional["Browser"]:
+        return cls._shared_browsers.get(browser_type)
+
+    @classmethod
+    def _get_shared_refcount(cls, browser_type: str) -> int:
+        return cls._shared_refcounts.get(browser_type, 0)
+
+    def __init__(
+        self,
+        headless: bool = False,
+        use_shared_browser: bool = True,
+        browser_type: str = "chromium",
+    ) -> None:
         """Create a BotBrowser.
 
         Args:
@@ -30,13 +54,37 @@ class BotBrowser:
             use_shared_browser: if True, reuse a process-wide browser and
                 create a new context/page for this instance. If False, the
                 instance manages its own playwright/browser lifecycle.
+            browser_type: which browser to use. One of ``"chromium"``
+                (default, Playwright's bundled Chromium), ``"chrome"``
+                (Google Chrome installed on the system), or ``"firefox"``
+                (Mozilla Firefox).
         """
+        if browser_type not in BROWSER_TYPES:
+            raise ValueError(
+                f"browser_type must be one of {BROWSER_TYPES!r}, got {browser_type!r}"
+            )
         self.headless = headless
         self.use_shared_browser = bool(use_shared_browser)
+        self.browser_type = browser_type
         self._playwright = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
+
+    # ------------------------------------------------------------------
+    # Internal helper — launch the correct browser via Playwright
+    # ------------------------------------------------------------------
+
+    def _launch_browser(self, pw) -> Browser:
+        """Launch and return a Playwright Browser for this instance's browser_type."""
+        if self.browser_type == "firefox":
+            return pw.firefox.launch(headless=self.headless)
+        elif self.browser_type == "chrome":
+            # Use the system-installed Google Chrome via Playwright's channel option.
+            return pw.chromium.launch(headless=self.headless, channel="chrome")
+        else:
+            # Default: Playwright's bundled Chromium
+            return pw.chromium.launch(headless=self.headless)
 
     def open(self, url: str, timeout_ms: int = 120000) -> None:
         """Launch browser and open the target URL."""
@@ -45,15 +93,17 @@ class BotBrowser:
             with BotBrowser._shared_lock:
                 if BotBrowser._shared_playwright is None:
                     BotBrowser._shared_playwright = sync_playwright().start()
-                if BotBrowser._shared_browser is None:
-                    BotBrowser._shared_browser = BotBrowser._shared_playwright.chromium.launch(
-                        headless=self.headless
+                if self.browser_type not in BotBrowser._shared_browsers:
+                    BotBrowser._shared_browsers[self.browser_type] = self._launch_browser(
+                        BotBrowser._shared_playwright
                     )
-                BotBrowser._shared_refcount += 1
+                BotBrowser._shared_refcounts[self.browser_type] = (
+                    BotBrowser._shared_refcounts.get(self.browser_type, 0) + 1
+                )
 
             # Reference the shared objects
             self._playwright = BotBrowser._shared_playwright
-            self._browser = BotBrowser._shared_browser
+            self._browser = BotBrowser._shared_browsers[self.browser_type]
             # Create an isolated context + page for this instance
             self._context = self._browser.new_context(viewport={"width": 1280, "height": 800})
             self.page = self._context.new_page()
@@ -62,7 +112,7 @@ class BotBrowser:
             if not self._playwright:
                 self._playwright = sync_playwright().start()
             if not self._browser:
-                self._browser = self._playwright.chromium.launch(headless=self.headless)
+                self._browser = self._launch_browser(self._playwright)
                 self._context = self._browser.new_context(viewport={"width": 1280, "height": 800})
                 self.page = self._context.new_page()
 
@@ -397,21 +447,24 @@ class BotBrowser:
                 self._context = None
 
             if self.use_shared_browser:
-                # Decrement shared refcount and shutdown shared browser when
-                # no more users remain.
+                # Decrement shared refcount for this browser_type and shut it
+                # down when no more users remain.
                 with BotBrowser._shared_lock:
-                    if BotBrowser._shared_refcount > 0:
-                        BotBrowser._shared_refcount -= 1
-                    # If this was the last reference, close shared browser/playwright
-                    if BotBrowser._shared_refcount == 0 and BotBrowser._shared_browser:
+                    count = BotBrowser._shared_refcounts.get(self.browser_type, 0)
+                    if count > 0:
+                        count -= 1
+                        BotBrowser._shared_refcounts[self.browser_type] = count
+                    # If this was the last reference for this browser type, close it.
+                    if count == 0 and self.browser_type in BotBrowser._shared_browsers:
                         try:
-                            BotBrowser._shared_browser.close()
+                            BotBrowser._shared_browsers[self.browser_type].close()
                         except Exception:
                             pass
-                        BotBrowser._shared_browser = None
+                        del BotBrowser._shared_browsers[self.browser_type]
+                    # If no browser types remain, stop the shared playwright.
+                    if not BotBrowser._shared_browsers and BotBrowser._shared_playwright:
                         try:
-                            if BotBrowser._shared_playwright:
-                                BotBrowser._shared_playwright.stop()
+                            BotBrowser._shared_playwright.stop()
                         except Exception:
                             pass
                         BotBrowser._shared_playwright = None
