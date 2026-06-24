@@ -83,12 +83,15 @@ def _load_autopilot_config() -> dict[str, Any]:
             ],
         },
         "timings": {
-            "feedback_wait_ms": 1500,
-            "after_click_wait_ms": 600,
-            "reload_wait_ms": 2500,
-            "next_wait_ms": 3000,
-            "dom_stable_wait_ms": 700,
-            "after_submit_wait_ms": 2000,
+            # Tiempos reducidos para mayor velocidad sin sacrificar estabilidad.
+            # El bot usa wait_for_load_state/networkidle antes de estos timeouts,
+            # por lo que en páginas rápidas el tiempo real será menor.
+            "feedback_wait_ms": 800,
+            "after_click_wait_ms": 300,
+            "reload_wait_ms": 2000,
+            "next_wait_ms": 2500,
+            "dom_stable_wait_ms": 400,
+            "after_submit_wait_ms": 1200,
         },
         "auth": {
             "wait_for_manual_auth": True,
@@ -106,10 +109,6 @@ def _load_autopilot_config() -> dict[str, Any]:
             "max_sheets": 10000,
             "max_intentos_por_pregunta": 8,
             "max_rondas_por_hoja": 20,
-            # Número de rondas idénticas a considerar para detectar un posible bucle
-            # (mismo conjunto de preguntas pendientes sin progreso). Si se supera,
-            # el bot recargará la página y limpiará los descartes para reintentar.
-            "loop_detection_rounds": 3,
         },
     }
     if not AUTOPILOT_CONFIG_FILE.exists():
@@ -962,6 +961,9 @@ class AutopilotRunner:
         self._running = False
         self._paused = False
         self._last_submit_payloads: list[dict[str, Any]] = []
+        # Caché de hashes de pregunta → hash calculado, por hoja
+        # Evita recalcular hashes repetidamente en cada ronda de la misma hoja
+        self._hash_cache: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Control externo
@@ -1086,7 +1088,28 @@ class AutopilotRunner:
                     "ERROR",
                 )
                 return False
-            time.sleep(poll_sec)
+
+            # Esperar de forma dirigida: preferir wait_for_selector si hay página,
+            # sino usar wait_for_timeout como fallback y finalmente time.sleep.
+            try:
+                if self.browser and self.browser.page:
+                    sel = self.ap_cfg.get("selectors", {}).get("question_container")
+                    if sel:
+                        try:
+                            self.browser.page.wait_for_selector(sel, timeout=int(poll_sec * 1000))
+                        except Exception:
+                            # No encontrado en el tiempo dado, continuar el bucle.
+                            pass
+                    else:
+                        try:
+                            self.browser.page.wait_for_timeout(int(poll_sec * 1000))
+                        except Exception:
+                            time.sleep(poll_sec)
+                else:
+                    time.sleep(poll_sec)
+            except Exception:
+                # En casos raros de error de Playwright, caer a sleep seguro.
+                time.sleep(poll_sec)
 
         return False
 
@@ -1131,7 +1154,18 @@ class AutopilotRunner:
                 }""",
                 selector,
             )
-            time.sleep(self.timings.get("after_click_wait_ms", 600) / 1000)
+            # Espera dirigida tras el click: preferir wait_for_timeout si hay página
+            wait_ms = int(self.timings.get("after_click_wait_ms", 600))
+            try:
+                if self.browser and self.browser.page:
+                    try:
+                        self.browser.page.wait_for_timeout(wait_ms)
+                    except Exception:
+                        pass
+                else:
+                    time.sleep(wait_ms / 1000)
+            except Exception:
+                time.sleep(wait_ms / 1000)
             return bool(clicked)
         except Exception as exc:
             self._log(f"Error JS click '{selector}': {exc}", "DEBUG")
@@ -1143,7 +1177,17 @@ class AutopilotRunner:
         for click_kwargs in ({}, {"force": True}):
             try:
                 self.browser.page.click(selector, timeout=5000, **click_kwargs)
-                time.sleep(self.timings.get("after_click_wait_ms", 600) / 1000)
+                wait_ms = int(self.timings.get("after_click_wait_ms", 600))
+                try:
+                    if self.browser and self.browser.page:
+                        try:
+                            self.browser.page.wait_for_timeout(wait_ms)
+                        except Exception:
+                            pass
+                    else:
+                        time.sleep(wait_ms / 1000)
+                except Exception:
+                    time.sleep(wait_ms / 1000)
                 return True
             except Exception:
                 continue
@@ -1155,7 +1199,17 @@ class AutopilotRunner:
         try:
             clicked = self.browser.page.evaluate(_JS_CLICK_BY_TEXT, text_hint)
             if clicked:
-                time.sleep(self.timings.get("after_click_wait_ms", 600) / 1000)
+                wait_ms = int(self.timings.get("after_click_wait_ms", 600))
+                try:
+                    if self.browser and self.browser.page:
+                        try:
+                            self.browser.page.wait_for_timeout(wait_ms)
+                        except Exception:
+                            pass
+                    else:
+                        time.sleep(wait_ms / 1000)
+                except Exception:
+                    time.sleep(wait_ms / 1000)
             return bool(clicked)
         except Exception as exc:
             self._log(f"Error JS click por texto '{text_hint}': {exc}", "DEBUG")
@@ -1260,8 +1314,9 @@ class AutopilotRunner:
                     pass
 
         payloads: list[dict[str, Any]] = []
+        # Limitar a las últimas 10 respuestas para reducir uso de memoria
         responses = getattr(self, "_pending_submit_responses", [])
-        for index, response in enumerate(list(responses)[-20:]):
+        for index, response in enumerate(list(responses)[-10:]):
             try:
                 headers = getattr(response, "headers", {}) or {}
                 content_type = headers.get("content-type", "").lower()
@@ -1274,7 +1329,8 @@ class AutopilotRunner:
                 payloads.append({
                     "url": getattr(response, "url", ""),
                     "content_type": content_type,
-                    "text": text[:200000],
+                    # Limitar a 50KB por respuesta para reducir uso de memoria
+                    "text": text[:51200],
                     "priority": priority,
                     "index": index,
                 })
@@ -1300,13 +1356,25 @@ class AutopilotRunner:
             response_handler = self._start_submit_response_capture()
             ok = self._click_selector_with_fallback(found)
             if ok:
-                wait_ms = self.timings.get("after_submit_wait_ms", 2000)
-                self._log(f"'Calificar' presionado. Esperando {wait_ms}ms para feedback...", "INFO")
-                time.sleep(wait_ms / 1000)
+                wait_ms = int(self.timings.get("after_submit_wait_ms", 1200))
+                self._log(f"'Calificar' presionado. Esperando feedback...", "INFO")
                 try:
-                    self.browser.page.wait_for_load_state("networkidle", timeout=3000)
+                    if self.browser and self.browser.page:
+                        # Primero esperar networkidle (se completa cuando la red se calma),
+                        # con un máximo de after_submit_wait_ms. Esto es más eficiente
+                        # que un sleep fijo porque termina antes si la página ya respondió.
+                        try:
+                            self.browser.page.wait_for_load_state("networkidle", timeout=wait_ms)
+                        except Exception:
+                            # Si networkidle tarda más, esperar el mínimo necesario
+                            try:
+                                self.browser.page.wait_for_timeout(min(wait_ms, 600))
+                            except Exception:
+                                pass
+                    else:
+                        time.sleep(wait_ms / 1000)
                 except Exception:
-                    pass
+                    time.sleep(wait_ms / 1000)
                 self._finish_submit_response_capture(response_handler)
                 return True
             self._finish_submit_response_capture(response_handler)
@@ -1324,22 +1392,40 @@ class AutopilotRunner:
             self._log("Botón 'Intenta de nuevo' encontrado. Haciendo clic...", "INFO")
             ok = self._click_selector_with_fallback(found)
             if ok:
-                wait_ms = self.timings.get("reload_wait_ms", 2500)
-                time.sleep(wait_ms / 1000)
+                wait_ms = int(self.timings.get("reload_wait_ms", 2500))
                 try:
-                    self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                    if self.browser and self.browser.page:
+                        try:
+                            self.browser.page.wait_for_timeout(wait_ms)
+                        except Exception:
+                            pass
+                        try:
+                            self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                        except Exception:
+                            pass
+                    else:
+                        time.sleep(wait_ms / 1000)
                 except Exception:
-                    pass
+                    time.sleep(wait_ms / 1000)
                 return True
 
         for text_hint in ["Intenta de nuevo", "Reintentar", "Intentar de nuevo", "Try again"]:
             if self._click_by_visible_text(text_hint):
-                wait_ms = self.timings.get("reload_wait_ms", 2500)
-                time.sleep(wait_ms / 1000)
+                wait_ms = int(self.timings.get("reload_wait_ms", 2500))
                 try:
-                    self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                    if self.browser and self.browser.page:
+                        try:
+                            self.browser.page.wait_for_timeout(wait_ms)
+                        except Exception:
+                            pass
+                        try:
+                            self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                        except Exception:
+                            pass
+                    else:
+                        time.sleep(wait_ms / 1000)
                 except Exception:
-                    pass
+                    time.sleep(wait_ms / 1000)
                 self._log(f"Reintentando con botón '{text_hint}'.", "INFO")
                 return True
 
@@ -1347,7 +1433,21 @@ class AutopilotRunner:
         self._log("Botón 'Intenta de nuevo' no encontrado. Recargando página...", "WARNING")
         try:
             self.browser.page.reload(timeout=self._pw_timeout_ms, wait_until="load")
-            time.sleep(self.timings.get("reload_wait_ms", 2500) / 1000)
+            wait_ms = int(self.timings.get("reload_wait_ms", 2500))
+            try:
+                if self.browser and self.browser.page:
+                    try:
+                        self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                    except Exception:
+                        pass
+                    try:
+                        self.browser.page.wait_for_timeout(wait_ms)
+                    except Exception:
+                        pass
+                else:
+                    time.sleep(wait_ms / 1000)
+            except Exception:
+                time.sleep(wait_ms / 1000)
             return True
         except Exception as exc:
             self._log(f"Error al recargar: {exc}", "ERROR")
@@ -1364,12 +1464,21 @@ class AutopilotRunner:
             self._log("Botón 'Siguiente' encontrado. Avanzando...", "INFO")
             ok = self._click_selector_with_fallback(found)
             if ok:
-                wait_ms = self.timings.get("next_wait_ms", 3000)
-                time.sleep(wait_ms / 1000)
+                wait_ms = int(self.timings.get("next_wait_ms", 3000))
                 try:
-                    self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                    if self.browser and self.browser.page:
+                        try:
+                            self.browser.page.wait_for_timeout(wait_ms)
+                        except Exception:
+                            pass
+                        try:
+                            self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                        except Exception:
+                            pass
+                    else:
+                        time.sleep(wait_ms / 1000)
                 except Exception:
-                    pass
+                    time.sleep(wait_ms / 1000)
 
                 # Comprobar si la navegación llevó inesperadamente al buscador
                 try:
@@ -1390,12 +1499,21 @@ class AutopilotRunner:
 
                         for text_hint in ["Siguiente", "Next", "Continuar", "Submit", "Enviar"]:
                             if self._click_by_visible_text(text_hint):
-                                wait_ms = self.timings.get("next_wait_ms", 3000)
-                                time.sleep(wait_ms / 1000)
+                                wait_ms = int(self.timings.get("next_wait_ms", 3000))
                                 try:
-                                    self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                                    if self.browser and self.browser.page:
+                                        try:
+                                            self.browser.page.wait_for_timeout(wait_ms)
+                                        except Exception:
+                                            pass
+                                        try:
+                                            self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                                        except Exception:
+                                            pass
+                                    else:
+                                        time.sleep(wait_ms / 1000)
                                 except Exception:
-                                    pass
+                                    time.sleep(wait_ms / 1000)
                                 self._log(f"Avanzado con botón '{text_hint}'.", "SUCCESS")
                                 return True
 
@@ -1407,12 +1525,21 @@ class AutopilotRunner:
 
         for text_hint in ["Siguiente", "Next", "Continuar", "Submit", "Enviar"]:
             if self._click_by_visible_text(text_hint):
-                wait_ms = self.timings.get("next_wait_ms", 3000)
-                time.sleep(wait_ms / 1000)
+                wait_ms = int(self.timings.get("next_wait_ms", 3000))
                 try:
-                    self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                    if self.browser and self.browser.page:
+                        try:
+                            self.browser.page.wait_for_timeout(wait_ms)
+                        except Exception:
+                            pass
+                        try:
+                            self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                        except Exception:
+                            pass
+                    else:
+                        time.sleep(wait_ms / 1000)
                 except Exception:
-                    pass
+                    time.sleep(wait_ms / 1000)
                 self._log(f"Avanzado con botón '{text_hint}'.", "SUCCESS")
                 return True
 
@@ -1621,7 +1748,10 @@ class AutopilotRunner:
         """
         texto_pregunta = pregunta_obj["question"]
         opciones: list[dict] = pregunta_obj["options"]
-        hash_p = self.db.calcular_hash(texto_pregunta)
+        # Usar caché de hash para evitar recalcularlo en cada ronda
+        if texto_pregunta not in self._hash_cache:
+            self._hash_cache[texto_pregunta] = self.db.calcular_hash(texto_pregunta)
+        hash_p = self._hash_cache[texto_pregunta]
 
         # Conjunto de data_ops/textos descartados para esta pregunta
         desc_ops = opciones_descartadas.get(hash_p, {}).get("ops", set())
@@ -1788,6 +1918,9 @@ class AutopilotRunner:
           - Presiona 'Calificar'.
           - Lee feedback, guarda correctas, descarta incorrectas.
           - Reintenta si hay incorrectas; avanza cuando todas correctas.
+
+        El bot se reanuda automáticamente ante errores inesperados (con backoff
+        exponencial). Solo se detiene cuando el usuario llama a stop().
         """
         self._running = True
         self._log("=== Modo Autopilot DB INICIADO ===", "SUCCESS")
@@ -1818,6 +1951,7 @@ class AutopilotRunner:
         max_hojas = self.limits.get("max_sheets", 10000)
         max_rondas = self.limits.get("max_rondas_por_hoja", 20)
         hojas_procesadas = 0
+        _error_backoff = 2  # segundos iniciales de espera ante error
 
         while self._running and hojas_procesadas < max_hojas:
             self._check_pause()
@@ -1833,6 +1967,10 @@ class AutopilotRunner:
             confirmadas_correctas: set[str] = set()
             hoja_completada = False
             hoja_sin_preguntas = False
+            # Limpiar caché de hashes al iniciar nueva hoja
+            self._hash_cache.clear()
+            if hasattr(self, "_attempt_counts"):
+                self._attempt_counts.clear()
 
             for ronda in range(max_rondas):
                 self._check_pause()
@@ -1840,8 +1978,33 @@ class AutopilotRunner:
                     break
 
                 # ── A. Extraer todas las preguntas ──────────────────────────
-                time.sleep(self.timings.get("dom_stable_wait_ms", 700) / 1000)
-                preguntas = self._extraer_todas_las_preguntas()
+                # Espera dirigida para que el DOM se estabilice: usar wait_for_selector
+                # que termina en cuanto el elemento aparece (más rápido que timeout fijo).
+                dom_wait_ms = int(self.timings.get("dom_stable_wait_ms", 400))
+                try:
+                    if self.browser and self.browser.page:
+                        sel = self.ap_cfg.get("selectors", {}).get("question_container")
+                        if sel:
+                            try:
+                                self.browser.page.wait_for_selector(sel, timeout=dom_wait_ms)
+                            except Exception:
+                                # No encontrado en tiempo, continuar de todas formas
+                                pass
+                        else:
+                            try:
+                                self.browser.page.wait_for_timeout(dom_wait_ms)
+                            except Exception:
+                                pass
+                    else:
+                        time.sleep(dom_wait_ms / 1000)
+                except Exception:
+                    time.sleep(dom_wait_ms / 1000)
+
+                try:
+                    preguntas = self._extraer_todas_las_preguntas()
+                except Exception as exc:
+                    self._log(f"Error al extraer preguntas: {exc}. Reintentando...", "WARNING")
+                    preguntas = None
 
                 if not preguntas:
                     self._log(
@@ -1857,52 +2020,17 @@ class AutopilotRunner:
                     "INFO",
                 )
 
-                # Detectar posible bucle: si en varias rondas consecutivas el
-                # conjunto de preguntas pendientes (por hash) no cambia, asumimos
-                # que estamos en un bucle y tomamos medidas (recargar y limpiar descartes).
-                loop_thresh = int(self.limits.get("loop_detection_rounds", 3))
-                if not hasattr(self, "_recent_pending_hashes"):
-                    self._recent_pending_hashes = []  # lista de listas (round -> set(hashes))
-                current_pending_hashes = [self.db.calcular_hash(p["question"]) for p in preguntas]
-                self._recent_pending_hashes.append(set(current_pending_hashes))
-                # Mantener solo las últimas `loop_thresh` rondas
-                if len(self._recent_pending_hashes) > loop_thresh:
-                    self._recent_pending_hashes.pop(0)
-                if (
-                    len(self._recent_pending_hashes) == loop_thresh
-                    and all(h == self._recent_pending_hashes[0] for h in self._recent_pending_hashes[1:])
-                ):
-                    # Estamos en bucle: recargar página y limpiar descartes para
-                    # intentar desde cero en esta hoja.
-                    self._log(
-                        f"Posible bucle detectado tras {loop_thresh} rondas idénticas. Recargando y limpiando descartes...",
-                        "WARNING",
-                    )
-                    try:
-                        # Recargar la página
-                        self.browser.page.reload(timeout=self._pw_timeout_ms, wait_until="load")
-                    except Exception:
-                        try:
-                            self.browser.page.evaluate("location.reload()")
-                        except Exception:
-                            pass
-                    # Limpiar descartes y resetear contadores de intentos para esta hoja
-                    opciones_descartadas.clear()
-                    if hasattr(self, "_attempt_counts"):
-                        self._attempt_counts.clear()
-                    # También borrar confirmadas para forzar re-evaluación
-                    confirmadas_correctas.clear()
-                    # Vaciar historial de rondas detectadas para evitar bucle infinito
-                    self._recent_pending_hashes.clear()
-                    # Pequeña espera para que la recarga surta efecto
-                    time.sleep(self.timings.get("reload_wait_ms", 2500) / 1000)
-                    # Tras recargar, continuar con la siguiente iteración (re-extraer)
-                    continue
-
                 # ── B. Responder preguntas (las no confirmadas aún) ─────────
+                # Usar caché de hash para evitar recalcular en cada iteración
+                def _hash(q: dict) -> str:
+                    txt = q["question"]
+                    if txt not in self._hash_cache:
+                        self._hash_cache[txt] = self.db.calcular_hash(txt)
+                    return self._hash_cache[txt]
+
                 preguntas_a_responder = [
                     p for p in preguntas
-                    if self.db.calcular_hash(p["question"]) not in confirmadas_correctas
+                    if _hash(p) not in confirmadas_correctas
                     or not p.get("answered")
                 ]
 
@@ -1911,6 +2039,58 @@ class AutopilotRunner:
                     hoja_completada = True
                     break
 
+                # ── Detección de bucle real ──────────────────────────────────
+                # Un bucle real ocurre cuando TODAS las preguntas pendientes ya
+                # tienen todas sus opciones descartadas: no hay ninguna opción nueva
+                # que intentar. En ese caso recargar la página y limpiar descartes.
+                all_options_exhausted = all(
+                    not [
+                        o for o in p["options"]
+                        if not self._opcion_descartada(
+                            o,
+                            opciones_descartadas.get(_hash(p), {}).get("ops", set()),
+                            opciones_descartadas.get(_hash(p), {}).get("txt", set()),
+                        )
+                    ]
+                    for p in preguntas_a_responder
+                    if p.get("options")  # solo si la pregunta tiene opciones
+                )
+
+                if all_options_exhausted and preguntas_a_responder:
+                    self._log(
+                        "Bucle detectado: todas las opciones de las preguntas pendientes "
+                        "han sido descartadas. Limpiando descartes y recargando página...",
+                        "WARNING",
+                    )
+                    opciones_descartadas.clear()
+                    confirmadas_correctas.clear()
+                    self._hash_cache.clear()
+                    if hasattr(self, "_attempt_counts"):
+                        self._attempt_counts.clear()
+                    reload_wait_ms = int(self.timings.get("reload_wait_ms", 2000))
+                    try:
+                        self.browser.page.reload(timeout=self._pw_timeout_ms, wait_until="load")
+                    except Exception:
+                        try:
+                            self.browser.page.evaluate("location.reload()")
+                        except Exception:
+                            pass
+                    try:
+                        if self.browser and self.browser.page:
+                            try:
+                                self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                            except Exception:
+                                pass
+                            try:
+                                self.browser.page.wait_for_timeout(reload_wait_ms)
+                            except Exception:
+                                pass
+                        else:
+                            time.sleep(reload_wait_ms / 1000)
+                    except Exception:
+                        time.sleep(reload_wait_ms / 1000)
+                    continue
+
                 elegidas: dict[str, dict] = {}  # hash_p → opción elegida
 
                 for pregunta_obj in preguntas_a_responder:
@@ -1918,7 +2098,7 @@ class AutopilotRunner:
                         break
                     self._check_pause()
 
-                    hash_p = self.db.calcular_hash(pregunta_obj["question"])
+                    hash_p = _hash(pregunta_obj)
                     opcion = self._elegir_opcion_para_pregunta(pregunta_obj, opciones_descartadas)
 
                     if opcion is None:
@@ -1944,11 +2124,33 @@ class AutopilotRunner:
                 if not calificado:
                     self._log("No se pudo presionar 'Calificar'. Reintentando en la siguiente ronda.", "WARNING")
                     # Esperar y continuar (quizá el botón aparezca)
-                    time.sleep(self.timings.get("feedback_wait_ms", 1500) / 1000)
+                    fb_wait_ms = int(self.timings.get("feedback_wait_ms", 800))
+                    try:
+                        if self.browser and self.browser.page:
+                            try:
+                                self.browser.page.wait_for_timeout(fb_wait_ms)
+                            except Exception:
+                                pass
+                        else:
+                            time.sleep(fb_wait_ms / 1000)
+                    except Exception:
+                        time.sleep(fb_wait_ms / 1000)
                     continue
 
                 # ── D. Leer feedback del DOM ────────────────────────────────
-                time.sleep(self.timings.get("feedback_wait_ms", 1500) / 1000)
+                # El wait ya se realizó dentro de _presionar_calificar() con networkidle.
+                # Solo añadir un margen mínimo si la página aún no procesó el feedback.
+                fb_wait_ms = int(self.timings.get("feedback_wait_ms", 800))
+                try:
+                    if self.browser and self.browser.page:
+                        try:
+                            self.browser.page.wait_for_load_state("networkidle", timeout=fb_wait_ms)
+                        except Exception:
+                            pass
+                    else:
+                        time.sleep(fb_wait_ms / 1000)
+                except Exception:
+                    pass
 
                 preguntas_incorrectas_en_ronda: list[dict] = []
 
@@ -1956,7 +2158,7 @@ class AutopilotRunner:
                     if not self._running:
                         break
 
-                    hash_p = self.db.calcular_hash(pregunta_obj["question"])
+                    hash_p = _hash(pregunta_obj)
                     data_item = pregunta_obj.get("data_item", "")
                     opcion_elegida = elegidas.get(hash_p)
 
@@ -2019,7 +2221,7 @@ class AutopilotRunner:
                 # ── E. Evaluar si debemos reintentar ────────────────────────
                 pendientes = [
                     p for p in preguntas
-                    if self.db.calcular_hash(p["question"]) not in confirmadas_correctas
+                    if _hash(p) not in confirmadas_correctas
                 ]
 
                 # Comprobar cristales si está disponible
@@ -2077,7 +2279,10 @@ class AutopilotRunner:
             f"Nuevas guardadas: {self.stats['nuevas_guardadas']}. ===",
             "SUCCESS",
         )
-        self._shutdown()
+        # Solo ejecutar shutdown si el usuario solicitó detener o se completó el trabajo.
+        # Esto preserva el navegador para auto-reanudación externa.
+        if not self._running:
+            self._shutdown()
 
     # ------------------------------------------------------------------
     # Helpers internos
@@ -2231,12 +2436,26 @@ if _HAS_PYQT:
                 stats_callback=lambda stats: self.db_stats_signal.emit(stats),
                 keep_browser_open=self._keep_browser_open,
             )
-            try:
-                self._runner.run()
-            except Exception as exc:
-                self.log_signal.emit(f"Error crítico en Autopilot: {exc}", "ERROR")
-            finally:
-                self.status_signal.emit("idle")
+            _backoff = 2
+            while True:
+                try:
+                    self._runner.run()
+                except Exception as exc:
+                    self.log_signal.emit(f"Error crítico en Autopilot: {exc}", "ERROR")
+                # Si el runner terminó porque el usuario detuvo, salir
+                if not (self._runner and self._runner._running):
+                    break
+                # Auto-reanudación: el bot se detuvo por error, reintentar
+                self.log_signal.emit(
+                    f"Autopilot detenido inesperadamente. Reanudando en {_backoff}s...", "WARNING"
+                )
+                import time as _time
+                _time.sleep(_backoff)
+                _backoff = min(_backoff * 2, 60)
+                # Restablecer _running para el próximo intento
+                if self._runner:
+                    self._runner._running = True
+            self.status_signal.emit("idle")
 
         def pause(self) -> None:
             if self._runner:

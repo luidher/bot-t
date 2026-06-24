@@ -1,14 +1,38 @@
-"""Playwright browser automation module for DOM-based reading and interaction."""
+"""Playwright browser automation module for DOM-based reading and interaction.
+
+This module adds an option to reuse a single Playwright browser process
+in-process and create a fresh context/page per `BotBrowser` instance. Reusing
+the browser process reduces memory consumption when multiple runner instances
+exist within the same Python process.
+"""
 from __future__ import annotations
 from pathlib import Path
 import time
+from threading import Lock
 from typing import Any, Dict, List, Optional
 from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
 
 
 class BotBrowser:
-    def __init__(self, headless: bool = False) -> None:
+    # Shared (process-wide) Playwright/browser instances and simple refcount
+    # to allow multiple BotBrowser instances to create lightweight contexts
+    # while sharing the underlying Chromium process.
+    _shared_playwright = None
+    _shared_browser: Optional[Browser] = None
+    _shared_refcount: int = 0
+    _shared_lock = Lock()
+
+    def __init__(self, headless: bool = False, use_shared_browser: bool = True) -> None:
+        """Create a BotBrowser.
+
+        Args:
+            headless: launch browser headless when creating a new browser.
+            use_shared_browser: if True, reuse a process-wide browser and
+                create a new context/page for this instance. If False, the
+                instance manages its own playwright/browser lifecycle.
+        """
         self.headless = headless
+        self.use_shared_browser = bool(use_shared_browser)
         self._playwright = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
@@ -16,20 +40,40 @@ class BotBrowser:
 
     def open(self, url: str, timeout_ms: int = 120000) -> None:
         """Launch browser and open the target URL."""
-        if not self._playwright:
-            self._playwright = sync_playwright().start()
+        if self.use_shared_browser:
+            # Ensure shared playwright/browser exist and increment refcount.
+            with BotBrowser._shared_lock:
+                if BotBrowser._shared_playwright is None:
+                    BotBrowser._shared_playwright = sync_playwright().start()
+                if BotBrowser._shared_browser is None:
+                    BotBrowser._shared_browser = BotBrowser._shared_playwright.chromium.launch(
+                        headless=self.headless
+                    )
+                BotBrowser._shared_refcount += 1
 
-        if not self._browser:
-            self._browser = self._playwright.chromium.launch(headless=self.headless)
-            self._context = self._browser.new_context(
-                viewport={"width": 1280, "height": 800}
-            )
+            # Reference the shared objects
+            self._playwright = BotBrowser._shared_playwright
+            self._browser = BotBrowser._shared_browser
+            # Create an isolated context + page for this instance
+            self._context = self._browser.new_context(viewport={"width": 1280, "height": 800})
             self.page = self._context.new_page()
+
+        else:
+            if not self._playwright:
+                self._playwright = sync_playwright().start()
+            if not self._browser:
+                self._browser = self._playwright.chromium.launch(headless=self.headless)
+                self._context = self._browser.new_context(viewport={"width": 1280, "height": 800})
+                self.page = self._context.new_page()
 
         assert self.page is not None
         self.page.set_default_timeout(timeout_ms)
         self.page.goto(url, timeout=timeout_ms, wait_until="load")
-        self.page.wait_for_load_state("load", timeout=timeout_ms)
+        try:
+            self.page.wait_for_load_state("load", timeout=timeout_ms)
+        except Exception:
+            # best-effort wait
+            pass
         time.sleep(1.0)
 
     def read_page(self, skip_questions: Optional[set[str] | list[str]] = None) -> Optional[Dict[str, Any]]:
@@ -334,19 +378,56 @@ class BotBrowser:
             return False
 
     def close(self) -> None:
-        """Close page, context, browser, and stop Playwright."""
+        """Close this instance's page/context and shutdown shared browser when
+        it is the last user.
+        """
         try:
             if self.page:
-                self.page.close()
+                try:
+                    self.page.close()
+                except Exception:
+                    pass
                 self.page = None
+
             if self._context:
-                self._context.close()
+                try:
+                    self._context.close()
+                except Exception:
+                    pass
                 self._context = None
-            if self._browser:
-                self._browser.close()
-                self._browser = None
-            if self._playwright:
-                self._playwright.stop()
-                self._playwright = None
+
+            if self.use_shared_browser:
+                # Decrement shared refcount and shutdown shared browser when
+                # no more users remain.
+                with BotBrowser._shared_lock:
+                    if BotBrowser._shared_refcount > 0:
+                        BotBrowser._shared_refcount -= 1
+                    # If this was the last reference, close shared browser/playwright
+                    if BotBrowser._shared_refcount == 0 and BotBrowser._shared_browser:
+                        try:
+                            BotBrowser._shared_browser.close()
+                        except Exception:
+                            pass
+                        BotBrowser._shared_browser = None
+                        try:
+                            if BotBrowser._shared_playwright:
+                                BotBrowser._shared_playwright.stop()
+                        except Exception:
+                            pass
+                        BotBrowser._shared_playwright = None
+            else:
+                # Instance-owned browser: close browser + stop playwright
+                if self._browser:
+                    try:
+                        self._browser.close()
+                    except Exception:
+                        pass
+                    self._browser = None
+                if self._playwright:
+                    try:
+                        self._playwright.stop()
+                    except Exception:
+                        pass
+                    self._playwright = None
         except Exception as e:
             print(f"[BROWSER ERROR] Error closing browser: {e}")

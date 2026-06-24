@@ -325,7 +325,8 @@ class AutopilotApp:
             self._browser_cmd_queue = None
 
     def _run_autopilot_in_browser_thread(self, browser: BotBrowser) -> None:
-        try:
+        import time as _time
+        if not self._runner:
             self._runner = AutopilotRunner(
                 url="",  # El browser ya está abierto y posicionado
                 log_callback=lambda msg, lvl: self._log_queue.put((lvl, msg)),
@@ -333,12 +334,24 @@ class AutopilotApp:
                 keep_browser_open=True,
                 browser=browser,
             )
-            self._runner.run()
-        except Exception as exc:
-            self._log_queue.put(("ERROR", f"Error crítico en Autopilot: {exc}"))
-        finally:
-            self._runner = None
-            self._ui_after(self._on_runner_finished)
+        _backoff = 2  # segundos iniciales de espera ante error
+        while True:
+            try:
+                self._runner.run()
+            except Exception as exc:
+                self._log_queue.put(("ERROR", f"Error crítico en Autopilot: {exc}"))
+            # Si el usuario detuvo el bot (stop() fue llamado), salir definitivamente
+            if self._closing or not (self._runner and self._runner._running):
+                break
+            # Auto-reanudación: el bot se detuvo por error, reintentar automáticamente
+            self._log_queue.put(("WARNING", f"Autopilot detenido inesperadamente. Reanudando en {_backoff}s..."))
+            _time.sleep(_backoff)
+            _backoff = min(_backoff * 2, 60)
+            # Restablecer _running para el próximo intento
+            if self._runner:
+                self._runner._running = True
+        self._runner = None
+        self._ui_after(self._on_runner_finished)
 
     def _on_browser_ready(self) -> None:
         self._btn_open.config(state="disabled", text="Navegador abierto")

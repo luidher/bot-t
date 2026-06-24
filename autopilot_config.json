@@ -65,12 +65,13 @@
         ]
     },
     "timings": {
-        "feedback_wait_ms":    1500,
-        "after_click_wait_ms": 600,
-        "reload_wait_ms":      2500,
-        "next_wait_ms":        3000,
-        "dom_stable_wait_ms":  700,
-        "after_submit_wait_ms": 2000
+        "_comentario": "Tiempos en ms. El bot usa networkidle/wait_for_selector para terminar antes si la página responde rápido; estos son los tiempos máximos de espera.",
+        "feedback_wait_ms":    800,
+        "after_click_wait_ms": 300,
+        "reload_wait_ms":      2000,
+        "next_wait_ms":        2500,
+        "dom_stable_wait_ms":  400,
+        "after_submit_wait_ms": 1200
     },
     "auth": {
         "wait_for_manual_auth": true,
@@ -80,8 +81,7 @@
     "limits": {
         "max_sheets":                   10000,
         "max_intentos_por_pregunta":    8,
-        "max_rondas_por_hoja":          20,
-        "loop_detection_rounds":        3
+        "max_rondas_por_hoja":          20
     },
     "browser": {
         "keep_open": false,
