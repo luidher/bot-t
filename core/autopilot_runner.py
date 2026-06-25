@@ -2026,6 +2026,8 @@ class AutopilotRunner:
             self._hash_cache.clear()
             if hasattr(self, "_attempt_counts"):
                 self._attempt_counts.clear()
+            # Contador de rondas consecutivas con feedback 'unknown' por pregunta (hash → count)
+            _unknown_streak: dict[str, int] = {}
 
             for ronda in range(max_rondas):
                 self._check_pause()
@@ -2055,16 +2057,37 @@ class AutopilotRunner:
                 except Exception:
                     time.sleep(dom_wait_ms / 1000)
 
-                try:
-                    preguntas = self._extraer_todas_las_preguntas()
-                except Exception as exc:
-                    self._log(f"Error al extraer preguntas: {exc}. Reintentando...", "WARNING")
-                    preguntas = None
+                preguntas = None
+                # Reintentar extracción hasta 3 veces si falla (ej: contexto destruido por navegación)
+                _MAX_EXTRACT_RETRIES = 3
+                for _extract_attempt in range(_MAX_EXTRACT_RETRIES):
+                    try:
+                        preguntas = self._extraer_todas_las_preguntas()
+                        if preguntas:
+                            break
+                    except Exception as exc:
+                        self._log(
+                            f"Error al extraer preguntas (intento {_extract_attempt + 1}/{_MAX_EXTRACT_RETRIES}): "
+                            f"{exc}. Esperando que la página estabilice...",
+                            "WARNING",
+                        )
+                        preguntas = None
+
+                    # Espera progresiva: 1s, 2s, 4s
+                    _wait_s = 2 ** _extract_attempt
+                    try:
+                        if self.browser and self.browser.page:
+                            self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                            self.browser.page.wait_for_timeout(_wait_s * 1000)
+                        else:
+                            time.sleep(_wait_s)
+                    except Exception:
+                        time.sleep(_wait_s)
 
                 if not preguntas:
                     self._log(
-                        f"Hoja {hojas_procesadas}: no se detectaron preguntas. "
-                        "Intentando avanzar...",
+                        f"Hoja {hojas_procesadas}: no se detectaron preguntas tras "
+                        f"{_MAX_EXTRACT_RETRIES} intentos. Intentando avanzar...",
                         "WARNING",
                     )
                     hoja_sin_preguntas = True
@@ -2221,6 +2244,8 @@ class AutopilotRunner:
                     )
 
                     if feedback == "correct":
+                        # Resetear el streak de unknown al confirmar correcto
+                        _unknown_streak.pop(hash_p, None)
                         # Guardar en DB si no está ya y no se respondió desde la DB
                         if hash_p not in confirmadas_correctas:
                             if not opcion_elegida.get("_from_db"):
@@ -2248,6 +2273,8 @@ class AutopilotRunner:
                         self.stats["respondidas_desde_db"] += 1
 
                     elif feedback == "incorrect":
+                        # Resetear el streak de unknown al confirmar incorrecto
+                        _unknown_streak.pop(hash_p, None)
                         self._log(
                             f"  ✘ INCORRECTO → descartando '{opcion_elegida['texto']}'",
                             "WARNING",
@@ -2257,11 +2284,24 @@ class AutopilotRunner:
                         self.stats["respondidas_al_azar"] += 1
 
                     else:
-                        self._log(
-                            f"  ? Feedback desconocido para '{pregunta_obj['question'][:40]}...'. "
-                            "se mantendrá pendiente.",
-                            "WARNING",
-                        )
+                        # Rastrear cuántas rondas consecutivas da 'unknown' esta pregunta.
+                        # Tras 2 rondas seguidas sin feedback, tratar como incorrecta
+                        # para que se elija otra opción en lugar de quedar bloqueada.
+                        _unknown_streak[hash_p] = _unknown_streak.get(hash_p, 0) + 1
+                        streak = _unknown_streak[hash_p]
+                        if streak >= 2:
+                            self._log(
+                                f"  ? Feedback desconocido por {streak} ronda(s) consecutiva(s) para "
+                                f"'{pregunta_obj['question'][:40]}...'. Tratando como incorrecto para intentar otra opción.",
+                                "WARNING",
+                            )
+                            self._registrar_descarte(opciones_descartadas, hash_p, opcion_elegida)
+                        else:
+                            self._log(
+                                f"  ? Feedback desconocido para '{pregunta_obj['question'][:40]}...'. "
+                                f"Se reintentará (ronda unknown #{streak}).",
+                                "WARNING",
+                            )
                         preguntas_incorrectas_en_ronda.append(pregunta_obj)
 
                 self._emit_stats()
