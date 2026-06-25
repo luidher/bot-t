@@ -83,15 +83,14 @@ def _load_autopilot_config() -> dict[str, Any]:
             ],
         },
         "timings": {
-            # Tiempos reducidos para mayor velocidad sin sacrificar estabilidad.
-            # El bot usa wait_for_load_state/networkidle antes de estos timeouts,
-            # por lo que en páginas rápidas el tiempo real será menor.
-            "feedback_wait_ms": 800,
+            # Los tiempos se usan como espera mínima real para que la plataforma
+            # procese el feedback y aplique las clases CSS antes de validar.
+            "feedback_wait_ms": 2500,
             "after_click_wait_ms": 300,
             "reload_wait_ms": 2000,
             "next_wait_ms": 2500,
             "dom_stable_wait_ms": 400,
-            "after_submit_wait_ms": 1200,
+            "after_submit_wait_ms": 2000,
         },
         "auth": {
             "wait_for_manual_auth": True,
@@ -755,11 +754,23 @@ def _compact_json_text(value: Any, limit: int = 12000) -> str:
         return _normalize_feedback_text(value)[:limit]
 
 
+def _any_word_match(text: str, words: tuple[str, ...]) -> bool:
+    """Verifica si alguna palabra coincide con límites de palabra (no substring)."""
+    if not text:
+        return False
+    for word in words:
+        if not word:
+            continue
+        if re.search(r"\b" + re.escape(word) + r"\b", text, flags=re.IGNORECASE):
+            return True
+    return False
+
+
 def _classify_feedback_words(text: str) -> str:
     norm = _normalize_feedback_text(text)
-    if any(word in norm for word in _PY_INCORRECT_WORDS):
+    if _any_word_match(norm, _PY_INCORRECT_WORDS):
         return "incorrect"
-    if any(word in norm for word in _PY_CORRECT_WORDS):
+    if _any_word_match(norm, _PY_CORRECT_WORDS):
         return "correct"
     return "unknown"
 
@@ -1347,6 +1358,56 @@ class AutopilotRunner:
                 "DEBUG",
             )
 
+    def _esperar_feedback_dom(self, timeout_ms: int) -> None:
+        """Espera hasta que el DOM muestre señales de feedback de respuesta."""
+        if timeout_ms <= 0:
+            return
+        if not self.browser or not self.browser.page:
+            time.sleep(timeout_ms / 1000)
+            return
+
+        deadline = time.monotonic() + (timeout_ms / 1000.0)
+        while time.monotonic() < deadline:
+            try:
+                ready = self.browser.page.evaluate(r"""
+() => {
+    const markers = ['correct','incorrect','wrong','error','success','acert','incorrecto','erroneo','mal'];
+    const containers = Array.from(document.querySelectorAll('li[data-item], li[data-type="OM"], .form-items > li[data-item], .form-items > li[data-type="OM"]'));
+    const hasMarker = (node) => {
+        if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
+        const hay = [
+            node.className || '',
+            node.getAttribute('class') || '',
+            node.getAttribute('data-result') || '',
+            node.getAttribute('data-status') || '',
+            node.getAttribute('aria-label') || '',
+            node.getAttribute('title') || '',
+        ].join(' ').toLowerCase();
+        if (markers.some(marker => hay.includes(marker))) return true;
+        return Array.from(node.querySelectorAll('*')).some(child => {
+            const childHay = [
+                child.className || '',
+                child.getAttribute('class') || '',
+                child.getAttribute('data-result') || '',
+                child.getAttribute('data-status') || '',
+                child.getAttribute('aria-label') || '',
+                child.getAttribute('title') || '',
+            ].join(' ').toLowerCase();
+            return markers.some(marker => childHay.includes(marker));
+        });
+    };
+    return containers.some(hasMarker);
+}
+""")
+                if ready:
+                    return
+            except Exception:
+                pass
+            try:
+                self.browser.page.wait_for_timeout(100)
+            except Exception:
+                time.sleep(0.1)
+
     def _presionar_calificar(self) -> bool:
         """Hace clic en el botón 'Calificar' (btn-submit) para enviar la hoja."""
         submit_selectors = self.ap_cfg["selectors"]["submit_button"]
@@ -1360,17 +1421,11 @@ class AutopilotRunner:
                 self._log(f"'Calificar' presionado. Esperando feedback...", "INFO")
                 try:
                     if self.browser and self.browser.page:
-                        # Primero esperar networkidle (se completa cuando la red se calma),
-                        # con un máximo de after_submit_wait_ms. Esto es más eficiente
-                        # que un sleep fijo porque termina antes si la página ya respondió.
                         try:
                             self.browser.page.wait_for_load_state("networkidle", timeout=wait_ms)
                         except Exception:
-                            # Si networkidle tarda más, esperar el mínimo necesario
-                            try:
-                                self.browser.page.wait_for_timeout(min(wait_ms, 600))
-                            except Exception:
-                                pass
+                            pass
+                        self._esperar_feedback_dom(wait_ms)
                     else:
                         time.sleep(wait_ms / 1000)
                 except Exception:
@@ -1971,6 +2026,8 @@ class AutopilotRunner:
             self._hash_cache.clear()
             if hasattr(self, "_attempt_counts"):
                 self._attempt_counts.clear()
+            # Contador de rondas consecutivas con feedback 'unknown' por pregunta (hash → count)
+            _unknown_streak: dict[str, int] = {}
 
             for ronda in range(max_rondas):
                 self._check_pause()
@@ -2000,16 +2057,37 @@ class AutopilotRunner:
                 except Exception:
                     time.sleep(dom_wait_ms / 1000)
 
-                try:
-                    preguntas = self._extraer_todas_las_preguntas()
-                except Exception as exc:
-                    self._log(f"Error al extraer preguntas: {exc}. Reintentando...", "WARNING")
-                    preguntas = None
+                preguntas = None
+                # Reintentar extracción hasta 3 veces si falla (ej: contexto destruido por navegación)
+                _MAX_EXTRACT_RETRIES = 3
+                for _extract_attempt in range(_MAX_EXTRACT_RETRIES):
+                    try:
+                        preguntas = self._extraer_todas_las_preguntas()
+                        if preguntas:
+                            break
+                    except Exception as exc:
+                        self._log(
+                            f"Error al extraer preguntas (intento {_extract_attempt + 1}/{_MAX_EXTRACT_RETRIES}): "
+                            f"{exc}. Esperando que la página estabilice...",
+                            "WARNING",
+                        )
+                        preguntas = None
+
+                    # Espera progresiva: 1s, 2s, 4s
+                    _wait_s = 2 ** _extract_attempt
+                    try:
+                        if self.browser and self.browser.page:
+                            self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                            self.browser.page.wait_for_timeout(_wait_s * 1000)
+                        else:
+                            time.sleep(_wait_s)
+                    except Exception:
+                        time.sleep(_wait_s)
 
                 if not preguntas:
                     self._log(
-                        f"Hoja {hojas_procesadas}: no se detectaron preguntas. "
-                        "Intentando avanzar...",
+                        f"Hoja {hojas_procesadas}: no se detectaron preguntas tras "
+                        f"{_MAX_EXTRACT_RETRIES} intentos. Intentando avanzar...",
                         "WARNING",
                     )
                     hoja_sin_preguntas = True
@@ -2063,7 +2141,6 @@ class AutopilotRunner:
                         "WARNING",
                     )
                     opciones_descartadas.clear()
-                    confirmadas_correctas.clear()
                     self._hash_cache.clear()
                     if hasattr(self, "_attempt_counts"):
                         self._attempt_counts.clear()
@@ -2112,8 +2189,10 @@ class AutopilotRunner:
                     if ok:
                         elegidas[hash_p] = opcion
                     else:
-                        self._log(f"  Clic fallido en '{opcion['texto']}'. Descartando.", "WARNING")
-                        self._registrar_descarte(opciones_descartadas, hash_p, opcion)
+                        self._log(
+                            f"  Clic fallido en '{opcion['texto']}'. NO se descarta (error temporal).",
+                            "WARNING",
+                        )
 
                 if not elegidas:
                     self._log("No se pudo marcar ninguna opción. Abortando hoja.", "ERROR")
@@ -2138,17 +2217,9 @@ class AutopilotRunner:
                     continue
 
                 # ── D. Leer feedback del DOM ────────────────────────────────
-                # El wait ya se realizó dentro de _presionar_calificar() con networkidle.
-                # Solo añadir un margen mínimo si la página aún no procesó el feedback.
-                fb_wait_ms = int(self.timings.get("feedback_wait_ms", 800))
+                fb_wait_ms = int(self.timings.get("feedback_wait_ms", 2500))
                 try:
-                    if self.browser and self.browser.page:
-                        try:
-                            self.browser.page.wait_for_load_state("networkidle", timeout=fb_wait_ms)
-                        except Exception:
-                            pass
-                    else:
-                        time.sleep(fb_wait_ms / 1000)
+                    self._esperar_feedback_dom(fb_wait_ms)
                 except Exception:
                     pass
 
@@ -2173,6 +2244,8 @@ class AutopilotRunner:
                     )
 
                     if feedback == "correct":
+                        # Resetear el streak de unknown al confirmar correcto
+                        _unknown_streak.pop(hash_p, None)
                         # Guardar en DB si no está ya y no se respondió desde la DB
                         if hash_p not in confirmadas_correctas:
                             if not opcion_elegida.get("_from_db"):
@@ -2200,6 +2273,8 @@ class AutopilotRunner:
                         self.stats["respondidas_desde_db"] += 1
 
                     elif feedback == "incorrect":
+                        # Resetear el streak de unknown al confirmar incorrecto
+                        _unknown_streak.pop(hash_p, None)
                         self._log(
                             f"  ✘ INCORRECTO → descartando '{opcion_elegida['texto']}'",
                             "WARNING",
@@ -2209,11 +2284,24 @@ class AutopilotRunner:
                         self.stats["respondidas_al_azar"] += 1
 
                     else:
-                        self._log(
-                            f"  ? Feedback desconocido para '{pregunta_obj['question'][:40]}...'. "
-                            "se mantendrá pendiente.",
-                            "WARNING",
-                        )
+                        # Rastrear cuántas rondas consecutivas da 'unknown' esta pregunta.
+                        # Tras 2 rondas seguidas sin feedback, tratar como incorrecta
+                        # para que se elija otra opción en lugar de quedar bloqueada.
+                        _unknown_streak[hash_p] = _unknown_streak.get(hash_p, 0) + 1
+                        streak = _unknown_streak[hash_p]
+                        if streak >= 2:
+                            self._log(
+                                f"  ? Feedback desconocido por {streak} ronda(s) consecutiva(s) para "
+                                f"'{pregunta_obj['question'][:40]}...'. Tratando como incorrecto para intentar otra opción.",
+                                "WARNING",
+                            )
+                            self._registrar_descarte(opciones_descartadas, hash_p, opcion_elegida)
+                        else:
+                            self._log(
+                                f"  ? Feedback desconocido para '{pregunta_obj['question'][:40]}...'. "
+                                f"Se reintentará (ronda unknown #{streak}).",
+                                "WARNING",
+                            )
                         preguntas_incorrectas_en_ronda.append(pregunta_obj)
 
                 self._emit_stats()
