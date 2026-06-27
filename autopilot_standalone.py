@@ -82,6 +82,7 @@ class AutopilotApp:
         self._closing = False
         self._log_queue: queue.Queue = queue.Queue()
         self._stats: dict = {}
+        self._var_browser_type = tk.StringVar(value="chromium")
 
         # Fuentes
         # Slightly smaller fonts for a compact layout
@@ -154,6 +155,18 @@ class AutopilotApp:
             command=self._on_open_browser,
         )
         self._btn_open.grid(row=0, column=2, padx=(0, 8))
+
+        # Botón Elegir Navegador
+        self._btn_select = tk.Button(
+            cfg_frame, text="⚙️  Elegir navegador",
+            font=self._font_btn,
+            bg=COLORS["surface"], fg=COLORS["text"],
+            activebackground=COLORS["surface2"], activeforeground=COLORS["text"],
+            relief="flat", bd=0, padx=12, pady=5,
+            cursor="hand2",
+            command=self._show_browser_menu,
+        )
+        self._btn_select.grid(row=0, column=3, padx=(0, 8))
 
         # ── Fila de botones de control ────────────────────────────────────
         btn_frame = tk.Frame(self.root, bg=COLORS["bg"], padx=20, pady=12)
@@ -264,6 +277,50 @@ class AutopilotApp:
     # Handlers de botones
     # ------------------------------------------------------------------
 
+    def _show_browser_menu(self) -> None:
+        menu = tk.Menu(self.root, tearoff=0, bg=COLORS["surface"], fg=COLORS["text"], activebackground=COLORS["accent"], activeforeground="white")
+        
+        menu.add_radiobutton(
+            label="Chromium (Predeterminado)",
+            variable=self._var_browser_type,
+            value="chromium",
+            command=self._on_browser_type_changed
+        )
+        menu.add_radiobutton(
+            label="Google Chrome",
+            variable=self._var_browser_type,
+            value="chrome",
+            command=self._on_browser_type_changed
+        )
+        menu.add_radiobutton(
+            label="Firefox",
+            variable=self._var_browser_type,
+            value="firefox",
+            command=self._on_browser_type_changed
+        )
+        menu.add_radiobutton(
+            label="Microsoft Edge",
+            variable=self._var_browser_type,
+            value="msedge",
+            command=self._on_browser_type_changed
+        )
+        
+        x = self._btn_select.winfo_rootx()
+        y = self._btn_select.winfo_rooty() + self._btn_select.winfo_height()
+        menu.post(x, y)
+
+    def _on_browser_type_changed(self) -> None:
+        browser_names = {
+            "chromium": "Chromium",
+            "chrome": "Chrome",
+            "firefox": "Firefox",
+            "msedge": "Edge"
+        }
+        selected = self._var_browser_type.get()
+        name = browser_names.get(selected, "Chromium")
+        self._btn_select.config(text=f"Elegir navegador ({name})")
+        self._append_log(f"Navegador seleccionado: {name}", "INFO")
+
     def _on_open_browser(self) -> None:
         url = self._var_url.get().strip()
         if not url or url == "https://":
@@ -274,6 +331,7 @@ class AutopilotApp:
             return
 
         self._btn_open.config(state="disabled", text="Abriendo...")
+        self._btn_select.config(state="disabled")
         self._set_status("Abriendo navegador...", COLORS["warning"])
         self._browser_cmd_queue = queue.Queue()
         self._closing = False
@@ -295,7 +353,7 @@ class AutopilotApp:
         """
         browser: BotBrowser | None = None
         try:
-            browser = BotBrowser(headless=False)
+            browser = BotBrowser(headless=False, browser_type=self._var_browser_type.get())
             browser.open(url, timeout_ms=120000)
             self._browser = browser
             self._log_queue.put(("INFO", "Navegador abierto. Haz login y luego presiona 'Iniciar Autopilot'."))
@@ -309,9 +367,13 @@ class AutopilotApp:
                     break
 
         except Exception as exc:
-            self._log_queue.put(("ERROR", f"Error al abrir el navegador: {exc}"))
+            err_msg = str(exc)
+            if "executable" in err_msg.lower() or "playwright install" in err_msg.lower():
+                err_msg += "\nTip: Asegúrate de tener instalado el navegador seleccionado o ejecuta 'playwright install <nombre_navegador>'."
+            self._log_queue.put(("ERROR", f"Error al abrir el navegador: {err_msg}"))
             self._ui_after(lambda: (
                 self._btn_open.config(state="normal", text="🌐  Abrir Navegador"),
+                self._btn_select.config(state="normal"),
                 self._set_status("Error al abrir", COLORS["error"]),
             ))
         finally:
@@ -355,6 +417,7 @@ class AutopilotApp:
 
     def _on_browser_ready(self) -> None:
         self._btn_open.config(state="disabled", text="Navegador abierto")
+        self._btn_select.config(state="disabled")
         self._btn_start.config(state="normal")
         self._set_status("Navegador listo — haz login y presiona Iniciar", COLORS["success"])
 
@@ -369,6 +432,7 @@ class AutopilotApp:
         self._btn_start.config(state="disabled")
         self._btn_stop.config(state="normal")
         self._btn_open.config(state="disabled")
+        self._btn_select.config(state="disabled")
         self._set_status("● Ejecutando...", COLORS["accent"])
 
         self._browser_cmd_queue.put("run")
@@ -384,8 +448,10 @@ class AutopilotApp:
         self._btn_stop.config(state="disabled")
         if self._browser and self._browser_cmd_queue:
             self._btn_open.config(state="disabled", text="Navegador abierto")
+            self._btn_select.config(state="disabled")
         else:
             self._btn_open.config(state="normal", text="🌐  Abrir Navegador")
+            self._btn_select.config(state="normal")
         self._set_status("● Inactivo", COLORS["text_muted"])
 
     # ------------------------------------------------------------------

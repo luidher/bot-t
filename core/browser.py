@@ -22,7 +22,7 @@ class BotBrowser:
     _shared_refcount: int = 0
     _shared_lock = Lock()
 
-    def __init__(self, headless: bool = False, use_shared_browser: bool = True) -> None:
+    def __init__(self, headless: bool = False, use_shared_browser: bool = True, browser_type: str = "chromium") -> None:
         """Create a BotBrowser.
 
         Args:
@@ -30,9 +30,14 @@ class BotBrowser:
             use_shared_browser: if True, reuse a process-wide browser and
                 create a new context/page for this instance. If False, the
                 instance manages its own playwright/browser lifecycle.
+            browser_type: type of browser to launch ("chromium", "chrome", "firefox", "msedge").
         """
         self.headless = headless
-        self.use_shared_browser = bool(use_shared_browser)
+        self.browser_type = browser_type
+        if browser_type != "chromium":
+            self.use_shared_browser = False
+        else:
+            self.use_shared_browser = bool(use_shared_browser)
         self._playwright = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
@@ -62,7 +67,14 @@ class BotBrowser:
             if not self._playwright:
                 self._playwright = sync_playwright().start()
             if not self._browser:
-                self._browser = self._playwright.chromium.launch(headless=self.headless)
+                if self.browser_type == "firefox":
+                    self._browser = self._playwright.firefox.launch(headless=self.headless)
+                elif self.browser_type == "chrome":
+                    self._browser = self._playwright.chromium.launch(headless=self.headless, channel="chrome")
+                elif self.browser_type == "msedge":
+                    self._browser = self._playwright.chromium.launch(headless=self.headless, channel="msedge")
+                else:
+                    self._browser = self._playwright.chromium.launch(headless=self.headless)
                 self._context = self._browser.new_context(viewport={"width": 1280, "height": 800})
                 self.page = self._context.new_page()
 
