@@ -1,14 +1,33 @@
-
-[23:00:18] 'Calificar' presionado. Esperando feedback...
-[23:00:18]   Diagnóstico feedback DOM id_item='HqALN6P5jLz5NpMzqlvK/y3q...': {'container': {'tag': 'li', 'className': '', 'dataResult': '', 'style': 'font-size: 16px;', 'color': 'rgb(0, 0, 0)', 'backgroundColor': 'rgba(0, 0, 0, 0)', 'text': '¿Para qué sirven los experimentos aleatorios? Para analizar la probabilidad de que ocurra un evento A, sabiendo que ha ocurrido un evento B Ninguno de las opciones Para analizar la'}, 'selectedPath': [{'tag': 'input', 'className': '', 'dataResult': '', 'style': '', 'color': 'rgb(0, 0, 0)', 'backgroundColor': 'rgba(0, 0, 0, 0)', 'text': ''}, {'tag': 'label', 'className': '', 'dataResult': '', 'style': '', 'color': 'rgb(0, 0, 0)', 'backgroundColor': 'rgba(0, 0, 0, 0)', 'text': 'Para analizar la probabilidad de que ocurran varios eventos simultáneos'}, {'tag': 'div', 'className': 'control-input', 'dataResult': '', 'style': '', 'color': 'rgb(0, 0, 0)', 'backgroundColor': 'rgba(0, 0, 0, 0)', 'text': 'Para analizar la probabilidad de que ocurran varios eventos simultáneos'}, {'tag': 'li', 'className': '', 'dataResult': '', 'style': 'font-size: 16px;', 'color': 'rgb(0, 0, 0)', 'backgroundColor': 'rgba(0, 0, 0, 0)', 'text': 'Para analizar la probabilidad de que ocurran varios eventos simultáneos'}, {'tag': 'ul', 'className': 'form-list options-list opm full', 'dataResult': '', 'style': '', 'color': 'rgb(0, 0, 0)', 'backgroundColor': 'rgba(0, 0, 0, 0)', 'text': 'Para analizar la probabilidad de que ocurra un evento A, sabiendo que ha ocurrido un evento B Ninguno de las opciones Para analizar la probabilidad de que ocurran varios eventos si'}]}
-[23:00:18]   Feedback '¿Para qué sirven los experimentos aleato...' → unknown (opción: 'Para analizar la probabilidad de que ocurran varios eventos simultáneos')
-[23:00:18]   ? Feedback desconocido para '¿Para qué sirven los experimentos aleato...'. se mantendrá pendiente.
-[23:00:18]   Diagnóstico feedback DOM id_item='gWgGzRvPnIF6VAdALJdQQ7eP...': {'container': {'tag': 'li', 'className': '', 'dataResult': '', 'style': 'font-size: 16px;', 'color': 'rgb(0, 0, 0)', 'backgroundColor': 'rgba(0, 0, 0, 0)', 'text': 'Identifica la situación que corresponde a un experimento que no es aleatorio. Predecir el clima Calcular la probabilidad de que al lanzar una moneda no caiga en cruz ni cara Escoge'}, 'selectedPath': [{'tag': 'input', 'className': '', 'dataResult': '', 'style': '', 'color': 'rgb(0, 0, 0)', 'backgroundColor': 'rgba(0, 0, 0, 0)', 'text': ''}, {'tag': 'label', 'className': '', 'dataResult': '', 'style': '', 'color': 'rgb(0, 0, 0)', 'backgroundColor': 'rgba(0, 0, 0, 0)', 'text': 'Predecir el clima'}, {'tag': 'div', 'className': 'control-input', 'dataResult': '', 'style': '', 'color': 'rgb(0, 0, 0)', 'backgroundColor': 'rgba(0, 0, 0, 0)', 'text': 'Predecir el clima'}, {'tag': 'li', 'className': '', 'dataResult': '', 'style': 'font-size: 16px;', 'color': 'rgb(0, 0, 0)', 'backgroundColor': 'rgba(0, 0, 0, 0)', 'text': 'Predecir el clima'}, {'tag': 'ul', 'className': 'form-list options-list opm full', 'dataResult': '', 'style': '', 'color': 'rgb(0, 0, 0)', 'backgroundColor': 'rgba(0, 0, 0, 0)', 'text': 'Predecir el clima Calcular la probabilidad de que al lanzar una moneda no caiga en cruz ni cara Escoger un apellido al azar de un directorio telefónico Calcular la probabilidad de '}]}
-[23:00:18]   Feedback 'Identifica la situación que corresponde ...' → unknown (opción: 'Predecir el clima')
-[23:00:18]   ? Feedback desconocido para 'Identifica la situación que corresponde ...'. se mantendrá pendiente.
-[23:00:18]   Diagnóstico feedback DOM id_item='a9i1Qtpk/GM9ST36lyyymfa9...': {'container': {'tag': 'li', 'className': '', 'dataResult': '', 'style': 'font-size: 16px;', 'color': 'rgb(0, 0, 0)', 'backgroundColor': 'rgba(0, 0, 0, 0)', 'text': 'Identifica una de las condiciones de un experimento aleatorio. Se puede repetir bajo condiciones similares Todos las opciones No se puede determinar el total de resultados posibles'}, 'selectedPath': [{'tag': 'input', 'className': '', 'dataResult': '', 'style': '', 'color': 'rgb(0, 0, 0)', 'backgroundColor': 'rgba(0, 0, 0, 0)', 'text': ''}, {'tag': 'label', 'className': '', 'dataResult': '', 'style': '', 'color': 'rgb(0, 0, 0)', 'backgroundColor': 'rgba(0, 0, 0, 0)', 'text': 'Se puede repetir bajo condiciones similares'}, {'tag': 'div', 'className': 'control-input', 'dataResult': '', 'style': '', 'color': 'rgb(0, 0, 0)', 'backgroundColor': 'rgba(0, 0, 0, 0)', 'text': 'Se puede repetir bajo condiciones similares'}, {'tag': 'li', 'className': '', 'dataResult': '', 'style': 'font-size: 16px;', 'color': 'rgb(0, 0, 0)', 'backgroundColor': 'rgba(0, 0, 0, 0)', 'text': 'Se puede repetir bajo condiciones similares'}, {'tag': 'ul', 'className': 'form-list options-list opm full', 'dataResult': '', 'style': '', 'color': 'rgb(0, 0, 0)', 'backgroundColor': 'rgba(0, 0, 0, 0)', 'text': 'Se puede repetir bajo condiciones similares Todos las opciones No se puede determinar el total de resultados posibles Se puede predecir el resultado'}]}
-[23:00:18]   Feedback 'Identifica una de las condiciones de un ...' → unknown (opción: 'Se puede repetir bajo condiciones similares')
-[23:00:18]   ? Feedback desconocido para 'Identifica una de las condiciones de un ...'. se mantendrá pendiente.
-[23:00:18]   4 pregunta(s) incorrectas/pendientes. Presionando 'Intenta de nuevo'...
-[23:00:18] Botón 'Intenta de nuevo' encontrado. Haciendo clic...
-
+[08:45:08]   Ronda 19: 5 pregunta(s) detectada(s) en la hoja.
+[08:45:08]   [DB] Respondiendo 'Observa la imagen y responde la pregunta.¿Con cuál...' → '[img: P1O3.jpg]'
+[08:45:13]   [DB] Se encontró registro en BD pero no se pudo mapear a ninguna opción actual.
+[08:45:13]   [AZAR] 'Observa la imagen y responde la pregunta.¿Con cuál...' → '[img: P4O1.jpg]'
+[08:45:18]   [DB] Se encontró registro en BD pero no se pudo mapear a ninguna opción actual.
+[08:45:18]   [AZAR] 'Observa la imagen y responde la pregunta.¿Con cuál...' → '[img: P3O3.jpg]'
+[08:45:24]   [DB] Respondiendo 'Observa la imagen y responde la pregunta.¿Con cuál...' → '[img: P5O1.jpg]'
+[08:45:29]   [DB] Se encontró registro en BD pero no se pudo mapear a ninguna opción actual.
+[08:45:29]   [AZAR] 'Observa la imagen y responde la pregunta.¿Con cuál...' → '[img: P2O4.jpg]'
+[08:45:34] Botón 'Calificar' encontrado. Haciendo clic...
+[08:45:40] 'Calificar' presionado. Esperando feedback...
+[08:45:41] Capturadas 1 respuesta(s) del servidor tras 'Calificar'; 1 parecen feedback de Registrar unidad.
+[08:45:41]   Feedback servidor id_item='6nqMQmUVS25LiSGb3sVn4Kn1...' → incorrect
+[08:45:42]   Feedback 'Observa la imagen y responde la pregunta...' → incorrect (opción: '[img: P2O4.jpg]')
+[08:45:42]   ✘ INCORRECTO → descartando '[img: P2O4.jpg]'
+[08:45:42]   Feedback servidor id_item='Dt7h3Lx0MeqlvI9KBbzzogU/...' → correct
+[08:45:42]   Feedback 'Observa la imagen y responde la pregunta...' → correct (opción: '[img: P2O4.jpg]')
+[08:45:42]   Feedback servidor id_item='6tQoCy/JLtDuVcXZ7VmOuRwh...' → incorrect
+[08:45:42]   Feedback 'Observa la imagen y responde la pregunta...' → incorrect (opción: '[img: P2O4.jpg]')
+[08:45:42]   ✘ INCORRECTO → descartando '[img: P2O4.jpg]'
+[08:45:42]   Feedback servidor id_item='/xBfZw+MjwIT8oc2ota93IYX...' → correct
+[08:45:42]   Feedback 'Observa la imagen y responde la pregunta...' → correct (opción: '[img: P5O1.jpg]')
+[08:45:42]   ✔ CORRECTO (ya estaba en DB) → omitiendo guardar para evitar duplicados: '[img: P5O1.jpg]'
+[08:45:42]   Feedback servidor id_item='Lv531EyGne5GkPBikSmhvEaL...' → incorrect
+[08:45:42]   Feedback 'Observa la imagen y responde la pregunta...' → incorrect (opción: '[img: P2O4.jpg]')
+[08:45:42]   ✘ INCORRECTO → descartando '[img: P2O4.jpg]'
+[08:45:42]   [CRISTALES] Detectados 1 de 3 esperados.
+[08:45:42]   [CRISTALES] < 3 cristales detectados a pesar de no haber preguntas pendientes en el bot.
+[08:45:42]   [CRISTALES] Posible colisión de preguntas o error de mapeo. Forzando reintento.
+[08:45:42]   5 pregunta(s) incorrectas/pendientes. Presionando 'Intenta de nuevo'...
+[08:45:42] Botón 'Intenta de nuevo' encontrado. Haciendo clic...
+[08:45:50] Error al extraer preguntas del DOM: Page.evaluate: Execution context was destroyed, most likely because of a navigation
+[08:45:58]   Ronda 20: 5 pregunta

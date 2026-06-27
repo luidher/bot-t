@@ -60,6 +60,7 @@ class BotConfig(BaseModel):
     # Playwright settings
     pw_timeout_ms: int = Field(default=60000, ge=0)
     pw_headless: bool = False           # False = browser visible
+    browser_type: str = Field(default="chromium")
 
     # Tesseract path (vision mode)
     tesseract_cmd: str = Field(default=r"C:\Program Files\Tesseract-OCR\tesseract.exe", max_length=500)
@@ -173,6 +174,7 @@ class BotConfigUpdate(BaseModel):
     # Playwright settings
     pw_timeout_ms: Optional[int] = Field(default=None, ge=0)
     pw_headless: Optional[bool] = None
+    browser_type: Optional[str] = None
 
     @field_validator("model", "vision_model", "reason_model", "ollama_host", "lang", "tesseract_cmd", "url", mode="before")
     @classmethod

@@ -280,7 +280,10 @@ class BotRunner:
 
         if not self.browser:
             self.log("Abriendo navegador con Playwright...", "INFO")
-            self.browser = BotBrowser(headless=self.config.get("pw_headless", False))
+            self.browser = BotBrowser(
+                headless=self.config.get("pw_headless", False),
+                browser_type=self.config.get("browser_type", "chromium")
+            )
             self.browser.open(url, timeout_ms=self.config.get("pw_timeout_ms", 60000))
             self.log(f"Navegando a {url}...", "INFO")
 

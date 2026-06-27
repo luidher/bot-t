@@ -946,6 +946,7 @@ class AutopilotRunner:
             _cfg = _cfg.dict()
         self._pw_timeout_ms: int = int(_cfg.get("pw_timeout_ms", 120000))
         self._pw_headless: bool = bool(_cfg.get("pw_headless", False))
+        self._browser_type: str = str(_cfg.get("browser_type", "chromium"))
 
         self.ap_cfg = _load_autopilot_config()
         self.timings = self.ap_cfg["timings"]
@@ -1985,7 +1986,7 @@ class AutopilotRunner:
         opened_browser = False
         if not self.browser:
             from core.browser import BotBrowser
-            self.browser = BotBrowser(headless=self._pw_headless)
+            self.browser = BotBrowser(headless=self._pw_headless, browser_type=self._browser_type)
             self._owned_browser = True
             if self.url:
                 try:
