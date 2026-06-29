@@ -96,6 +96,8 @@ def _load_autopilot_config() -> dict[str, Any]:
             "wait_for_manual_auth": True,
             "manual_auth_timeout_sec": 300,
             "manual_auth_poll_sec": 1.0,
+            "use_external_chrome_for_auth": True,
+            "chrome_executable": None,
         },
         "browser": {
             "keep_open": False,
@@ -1072,12 +1074,30 @@ class AutopilotRunner:
     def _wait_for_manual_auth_and_questions(self) -> bool:
         if not self.auth_cfg.get("wait_for_manual_auth", True):
             return True
-        if not self.browser or not self.browser.page:
+        if not self.browser:
             return False
 
         timeout_sec = float(self.auth_cfg.get("manual_auth_timeout_sec", 300))
         poll_sec = max(float(self.auth_cfg.get("manual_auth_poll_sec", 1.0)), 0.2)
         started_at = time.monotonic()
+
+        if self.auth_cfg.get("use_external_chrome_for_auth", True) and not self.browser.page:
+            self._log(
+                "Chrome del sistema abierto para autenticación manual. Completa el login y luego confirma en la app.",
+                "INFO",
+            )
+            try:
+                self.browser.connect_to_existing_browser(
+                    url=self.url,
+                    timeout_ms=int(self.browser_cfg.get("pw_timeout_ms", 120000)),
+                )
+                self._log("Conectado a la sesión de Chrome existente por CDP.", "SUCCESS")
+            except Exception as exc:
+                self._log(f"No se pudo conectar a la sesión de Chrome existente: {exc}", "ERROR")
+                return False
+
+        if not self.browser.page:
+            return False
 
         self._log(
             "Navegador abierto. Autentícate manualmente y navega hasta la hoja de preguntas; "
@@ -1101,8 +1121,6 @@ class AutopilotRunner:
                 )
                 return False
 
-            # Esperar de forma dirigida: preferir wait_for_selector si hay página,
-            # sino usar wait_for_timeout como fallback y finalmente time.sleep.
             try:
                 if self.browser and self.browser.page:
                     sel = self.ap_cfg.get("selectors", {}).get("question_container")
@@ -1110,7 +1128,6 @@ class AutopilotRunner:
                         try:
                             self.browser.page.wait_for_selector(sel, timeout=int(poll_sec * 1000))
                         except Exception:
-                            # No encontrado en el tiempo dado, continuar el bucle.
                             pass
                     else:
                         try:
@@ -1120,7 +1137,6 @@ class AutopilotRunner:
                 else:
                     time.sleep(poll_sec)
             except Exception:
-                # En casos raros de error de Playwright, caer a sleep seguro.
                 time.sleep(poll_sec)
 
         return False
@@ -1990,9 +2006,18 @@ class AutopilotRunner:
             self._owned_browser = True
             if self.url:
                 try:
-                    self.browser.open(self.url, timeout_ms=self._pw_timeout_ms)
-                    opened_browser = True
-                    self._log(f"Navegador abierto en: {self.url}", "INFO")
+                    if self.auth_cfg.get("use_external_chrome_for_auth", True):
+                        self.browser.launch_external_browser(
+                            url=self.url,
+                            timeout_ms=self._pw_timeout_ms,
+                            executable=self.auth_cfg.get("chrome_executable"),
+                        )
+                        opened_browser = True
+                        self._log(f"Chrome del sistema abierto en: {self.url}", "INFO")
+                    else:
+                        self.browser.open(self.url, timeout_ms=self._pw_timeout_ms)
+                        opened_browser = True
+                        self._log(f"Navegador abierto en: {self.url}", "INFO")
                 except Exception as exc:
                     self._log(f"Error al abrir el navegador: {exc}", "ERROR")
                     self._shutdown()

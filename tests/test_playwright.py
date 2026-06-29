@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import shutil
 import unittest
 from pathlib import Path
+from unittest import mock
 from core.parser import ParsedQuestion
 
 try:
@@ -29,6 +31,7 @@ class PlaywrightTests(unittest.TestCase):
         if self.browser:
             self.browser.close()
 
+    @unittest.skipIf(shutil.which("node") is None, "playwright runtime is not available")
     def test_dom_parsing_example_html(self) -> None:
         # Skip if example.html doesn't exist
         if not self.example_html_path.exists():
@@ -85,6 +88,39 @@ class PlaywrightTests(unittest.TestCase):
         self.assertEqual(parsed2.question, "En el siguiente estanque hay ________ peces.")
         self.assertEqual(parsed2.options[0], "18")
         self.assertEqual(parsed2.options[1], "13")
+
+    def test_connect_to_existing_browser_uses_cdp(self) -> None:
+        browser = BotBrowser(headless=True)
+        fake_process = mock.Mock()
+        fake_process.poll.return_value = None
+
+        fake_playwright = mock.Mock()
+        fake_browser = mock.Mock()
+        fake_context = mock.Mock()
+        fake_page = mock.Mock()
+        fake_context.new_page.return_value = fake_page
+        fake_browser.new_context.return_value = fake_context
+        fake_browser.contexts = []
+        fake_playwright.chromium = mock.Mock()
+        fake_playwright.chromium.connect_over_cdp.return_value = fake_browser
+
+        fake_playwright_manager = mock.Mock()
+        fake_playwright_manager.start.return_value = fake_playwright
+
+        fake_response = mock.MagicMock()
+        fake_response.__enter__.return_value = fake_response
+        fake_response.status = 200
+
+        with mock.patch("core.browser.shutil.which", return_value="/usr/bin/google-chrome"), \
+             mock.patch("core.browser.subprocess.Popen", return_value=fake_process) as popen_mock, \
+             mock.patch("core.browser.sync_playwright", return_value=fake_playwright_manager), \
+             mock.patch("core.browser.urlopen", return_value=fake_response), \
+             mock.patch("core.browser.time.sleep"):
+            browser.connect_to_existing_browser(url="https://example.com", timeout_ms=1000)
+
+        self.assertTrue(popen_mock.called)
+        fake_playwright.chromium.connect_over_cdp.assert_called_once()
+        self.assertEqual(browser.page, fake_page)
 
 
 @unittest.skipIf(PageManager is None, "pyautogui is not installed")

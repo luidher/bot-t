@@ -36,6 +36,8 @@ class BotConfig(BaseModel):
     wait_for_manual_auth: bool = Field(default=True)
     manual_auth_timeout_sec: int = Field(default=300, ge=0)
     manual_auth_poll_sec: float = Field(default=1.0, ge=0.1, le=60.0)
+    use_external_chrome_for_auth: bool = Field(default=True)
+    chrome_executable: Optional[str] = Field(default=None, max_length=500)
 
     # OCR (vision mode)
     lang: str = Field(default="spa+eng", min_length=1, max_length=80)
@@ -152,6 +154,8 @@ class BotConfigUpdate(BaseModel):
     wait_for_manual_auth: Optional[bool] = None
     manual_auth_timeout_sec: Optional[int] = Field(default=None, ge=0)
     manual_auth_poll_sec: Optional[float] = Field(default=None, ge=0.1, le=60.0)
+    use_external_chrome_for_auth: Optional[bool] = None
+    chrome_executable: Optional[str] = Field(default=None, max_length=500)
     lang: Optional[str] = Field(default=None, min_length=1, max_length=80)
     psm: Optional[int] = Field(default=None, ge=0, le=13)
     region: Optional[tuple[int, int, int, int]] = None
