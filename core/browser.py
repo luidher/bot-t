@@ -7,9 +7,13 @@ exist within the same Python process.
 """
 from __future__ import annotations
 from pathlib import Path
+import shutil
+import subprocess
+import tempfile
 import time
 from threading import Lock
 from typing import Any, Dict, List, Optional
+from urllib.request import Request, urlopen
 from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
 
 
@@ -42,6 +46,111 @@ class BotBrowser:
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
+        self._cdp_endpoint: Optional[str] = None
+        self._external_browser_process: Optional[subprocess.Popen] = None
+
+    def _resolve_chrome_executable(self, executable: Optional[str] = None) -> str:
+        candidates: list[str] = []
+        if executable:
+            candidates.append(executable)
+        candidates.extend(
+            [
+                "google-chrome",
+                "google-chrome-stable",
+                "chromium",
+                "chromium-browser",
+                "microsoft-edge",
+                "msedge",
+            ]
+        )
+        for candidate in candidates:
+            if candidate and shutil.which(candidate):
+                return shutil.which(candidate)  # type: ignore[return-value]
+        raise FileNotFoundError(
+            "No se encontró un ejecutable de Chrome/Chromium en el sistema. "
+            "Instala Google Chrome o Chromium y vuelve a intentarlo."
+        )
+
+    def _wait_for_cdp_endpoint(self, endpoint: str, timeout_ms: int) -> None:
+        deadline = time.monotonic() + (timeout_ms / 1000.0)
+        while time.monotonic() < deadline:
+            try:
+                with urlopen(Request(f"{endpoint}/json/version"), timeout=1.0) as response:
+                    if response.status == 200:
+                        return
+            except Exception:
+                time.sleep(0.5)
+        raise TimeoutError(f"No se pudo contactar el endpoint CDP en {endpoint}")
+
+    def launch_external_browser(
+        self,
+        url: Optional[str] = None,
+        timeout_ms: int = 120000,
+        executable: Optional[str] = None,
+    ) -> str:
+        """Launch the system Chrome/Chromium instance for manual authentication."""
+        chrome_executable = self._resolve_chrome_executable(executable)
+        tmp_root = Path("tmp")
+        tmp_root.mkdir(exist_ok=True)
+        user_data_dir = Path(tempfile.mkdtemp(prefix="bot-chrome-", dir=str(tmp_root)))
+        port = 9222
+        endpoint = f"http://127.0.0.1:{port}"
+
+        args = [
+            chrome_executable,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={user_data_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-dev-shm-usage",
+        ]
+        if url:
+            args.append(url)
+
+        self._external_browser_process = subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+        )
+        self._wait_for_cdp_endpoint(endpoint, timeout_ms)
+        self._cdp_endpoint = endpoint
+        return endpoint
+
+    def connect_to_existing_browser(
+        self,
+        url: Optional[str] = None,
+        timeout_ms: int = 120000,
+        cdp_endpoint: Optional[str] = None,
+    ) -> None:
+        """Connect Playwright to an already-open Chrome/Chromium instance via CDP."""
+        if cdp_endpoint is None:
+            cdp_endpoint = self._cdp_endpoint
+        if not cdp_endpoint:
+            cdp_endpoint = self.launch_external_browser(url=url, timeout_ms=timeout_ms)
+
+        if not self._playwright:
+            self._playwright = sync_playwright().start()
+
+        self._browser = self._playwright.chromium.connect_over_cdp(cdp_endpoint)
+        if self._browser.contexts:
+            context = self._browser.contexts[0]
+            self._context = context
+            if context.pages:
+                self.page = context.pages[0]
+            else:
+                self.page = context.new_page()
+        else:
+            self._context = self._browser.new_context(viewport={"width": 1280, "height": 800})
+            self.page = self._context.new_page()
+
+        assert self.page is not None
+        self.page.set_default_timeout(timeout_ms)
+        if url and self.page:
+            try:
+                self.page.goto(url, timeout=timeout_ms, wait_until="load")
+            except Exception:
+                pass
 
     def open(self, url: str, timeout_ms: int = 120000) -> None:
         """Launch browser and open the target URL."""
@@ -122,31 +231,89 @@ class BotBrowser:
             let targetContainer = null;
             let isFallback = false;
 
+            // Helper para extraer identificador textual de una imagen
+            const getImgIdentifier = (img) => {
+                const srcAttr = (img.tagName && img.tagName.toLowerCase() === 'img')
+                    ? (img.getAttribute('src') || '') : '';
+                let imgId = '';
+                if (srcAttr) {
+                    if (srcAttr.startsWith('data:')) {
+                        const mimeMatch = srcAttr.match(/data:image\/([a-zA-Z0-9+]+);/);
+                        const ext = mimeMatch ? mimeMatch[1] : 'png';
+                        let hash = 0;
+                        for (let i = 0; i < srcAttr.length; i++) {
+                            hash = (hash << 5) - hash + srcAttr.charCodeAt(i);
+                            hash |= 0;
+                        }
+                        imgId = `data_uri_${Math.abs(hash)}.${ext}`;
+                    } else {
+                        const parts = srcAttr.split('?')[0].split('/');
+                        imgId = parts[parts.length - 1] || srcAttr;
+                    }
+                }
+                const alt = (img.getAttribute && (img.getAttribute('alt') || img.getAttribute('title') || img.getAttribute('aria-label'))) || '';
+                const altClean = alt.trim().replace(/\s+/g, ' ');
+                if (imgId && altClean && altClean.toLowerCase() !== 'pregunta' && altClean.toLowerCase() !== 'imagen') {
+                    return `${imgId} - ${altClean}`;
+                } else if (imgId) {
+                    return imgId;
+                } else if (altClean) {
+                    return altClean;
+                }
+                return '';
+            };
+
             const getQuestionData = (container) => {
                 const qEl = container.querySelector('.question, .pregunta');
+                let text = '';
+                let html = '';
                 if (qEl) {
                     // Clonar y eliminar la lista de opciones para no incluir su texto
                     const clone = qEl.cloneNode(true);
                     clone.querySelectorAll('.form-list, .options-list, ul').forEach(el => el.remove());
-                    return {
-                        text: (clone.innerText || "").replace(/\s+/g, " ").trim(),
-                        html: qEl.outerHTML
-                    };
+                    text = (clone.innerText || '').replace(/\s+/g, ' ').trim();
+                    html = qEl.outerHTML;
+                } else {
+                    const pEl = container.querySelector('p, h2, h3, h4');
+                    if (pEl) {
+                        text = (pEl.innerText || '').replace(/\s+/g, ' ').trim();
+                        html = pEl.outerHTML;
+                    } else {
+                        // Fallback: container sin opciones
+                        const clone = container.cloneNode(true);
+                        clone.querySelectorAll('.form-list, .options-list, ul').forEach(el => el.remove());
+                        text = (clone.innerText || '').replace(/\s+/g, ' ').trim();
+                        html = container.outerHTML;
+                    }
                 }
-                const pEl = container.querySelector('p, h2, h3, h4');
-                if (pEl) {
-                    return {
-                        text: (pEl.innerText || "").replace(/\s+/g, " ").trim(),
-                        html: pEl.outerHTML
-                    };
-                }
-                // Fallback: container sin opciones
-                const clone = container.cloneNode(true);
-                clone.querySelectorAll('.form-list, .options-list, ul').forEach(el => el.remove());
-                return {
-                    text: (clone.innerText || "").replace(/\s+/g, " ").trim(),
-                    html: container.outerHTML
-                };
+
+                // Agregar identificadores de imagenes de la pregunta (excluyendo las que
+                // están dentro de las opciones de respuesta)
+                try {
+                    const srcEl = qEl || container;
+                    const imgs = Array.from(srcEl.querySelectorAll('img, svg, canvas'));
+                    const imgTags = [];
+                    for (const img of imgs) {
+                        // Verificar que no esté dentro de un label/input (opcion)
+                        let insideOption = false;
+                        let p = img.parentElement;
+                        while (p && p !== srcEl) {
+                            if (p.tagName === 'LABEL' || p.querySelector('input[type="radio"], input[type="checkbox"]')) {
+                                insideOption = true;
+                                break;
+                            }
+                            p = p.parentElement;
+                        }
+                        if (insideOption) continue;
+                        const id = getImgIdentifier(img);
+                        if (id) imgTags.push(`[img: ${id}]`);
+                    }
+                    if (imgTags.length > 0) {
+                        text = text ? `${text} ${imgTags.join(' ')}` : imgTags.join(' ');
+                    }
+                } catch (_) {}
+
+                return { text, html };
             };
 
             // ── Buscar primer contenedor sin responder ──────────────────────
@@ -302,6 +469,24 @@ class BotBrowser:
                 }
 
                 labelText = labelText.trim();
+
+                // Agregar identificadores de imagenes dentro de la opción
+                try {
+                    const optRoot = optionElement || input.parentElement || input;
+                    const optImgs = Array.from(optRoot.querySelectorAll('img, svg, canvas'));
+                    const optImgTags = [];
+                    for (const img of optImgs) {
+                        const id = getImgIdentifier(img);
+                        if (id) optImgTags.push(`[img: ${id}]`);
+                    }
+                    if (optImgTags.length > 0) {
+                        labelText = labelText ? `${labelText} ${optImgTags.join(' ')}` : optImgTags.join(' ');
+                    }
+                } catch (_) {}
+
+                // Fallback si el texto sigue vacio
+                if (!labelText) labelText = `Opción ${options.length + 1}`;
+
                 options.push(labelText);
                 optionsHtml.push(labelHtml);
                 selectors.push(getUniqueSelector(input));
@@ -407,6 +592,17 @@ class BotBrowser:
                 except Exception:
                     pass
                 self._context = None
+
+            if self._external_browser_process:
+                try:
+                    self._external_browser_process.terminate()
+                    self._external_browser_process.wait(timeout=5)
+                except Exception:
+                    try:
+                        self._external_browser_process.kill()
+                    except Exception:
+                        pass
+                self._external_browser_process = None
 
             if self.use_shared_browser:
                 # Decrement shared refcount and shutdown shared browser when

@@ -98,12 +98,35 @@ class BotRunner:
         if not self.config.get("wait_for_manual_auth", True):
             return True
 
-        if not self.browser or not self.browser.page:
+        if not self.browser:
             return False
 
         timeout_sec = int(self.config.get("manual_auth_timeout_sec", 300))
         poll_sec = float(self.config.get("manual_auth_poll_sec", 1.0))
         poll_sec = max(poll_sec, 0.2)
+
+        if self.config.get("use_external_chrome_for_auth", True) and not self.browser.page:
+            self.log(
+                "Se abrió Chrome del sistema para autenticación manual. Completa el login y pulsa Enter para continuar.",
+                "INFO",
+            )
+            try:
+                input("Autenticación manual completada. Presiona Enter para continuar...")
+            except EOFError:
+                self.log("No se detectó entrada interactiva; se continuará con la conexión al navegador existente.", "WARNING")
+            try:
+                self.browser.connect_to_existing_browser(
+                    url=self.config.get("url"),
+                    timeout_ms=self.config.get("pw_timeout_ms", 60000),
+                    cdp_endpoint=None,
+                )
+                self.log("Conectado a la sesión de Chrome existente por CDP.", "SUCCESS")
+            except Exception as exc:
+                self.log(f"No se pudo conectar a la sesión de Chrome existente: {exc}", "ERROR")
+                return False
+
+        if not self.browser.page:
+            return False
 
         start_at = time.monotonic()
         notified_wait = False
@@ -279,13 +302,21 @@ class BotRunner:
             raise ValueError("Configura la URL antes de iniciar.")
 
         if not self.browser:
-            self.log("Abriendo navegador con Playwright...", "INFO")
+            self.log("Preparando flujo de navegador para autenticación manual y automatización posterior.", "INFO")
             self.browser = BotBrowser(
                 headless=self.config.get("pw_headless", False),
                 browser_type=self.config.get("browser_type", "chromium")
             )
-            self.browser.open(url, timeout_ms=self.config.get("pw_timeout_ms", 60000))
-            self.log(f"Navegando a {url}...", "INFO")
+            if self.config.get("use_external_chrome_for_auth", True):
+                self.log("Abriendo Chrome del sistema para autenticación manual sin Playwright.", "INFO")
+                self.browser.launch_external_browser(
+                    url=url,
+                    timeout_ms=self.config.get("pw_timeout_ms", 60000),
+                    executable=self.config.get("chrome_executable"),
+                )
+            else:
+                self.browser.open(url, timeout_ms=self.config.get("pw_timeout_ms", 60000))
+                self.log(f"Navegando a {url}...", "INFO")
 
             if self.config.get("wait_for_manual_auth", True):
                 if not self._wait_for_manual_auth_and_questions():

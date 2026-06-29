@@ -42,24 +42,44 @@ class ParsedQuestion:
         math_parser = MathJaxParser()
 
         question_html = data.get("question_html")
+        # Texto ya extraído por JS (puede contener [img: ...] tags)
+        question_js = str(data.get("question", "")).strip()
         if question_html:
             cleaned_html = math_parser.replace_mathjax(question_html)
             question = BeautifulSoup(cleaned_html, "html.parser").get_text().strip()
             question = re.sub(r"\s+", " ", question)
+            # Si HTML queda vacío (ej. solo imágenes), usar el texto extraído por JS
+            if not question:
+                question = question_js
+            else:
+                # Recuperar etiquetas [img: ...] del texto JS que BeautifulSoup no extrae
+                js_imgs = re.findall(r"\[img:\s*[^\]]+\]", question_js)
+                if js_imgs:
+                    question = f"{question} {' '.join(js_imgs)}".strip()
         else:
-            question = str(data.get("question", "")).strip()
+            question = question_js
 
         options_html = data.get("options_html")
+        # Textos de opciones ya extraídos por JS
+        options_js = [str(o).strip() for o in data.get("options", [])]
         if options_html:
             options = []
-            for opt_html in options_html:
+            for i, opt_html in enumerate(options_html):
                 cleaned_opt_html = math_parser.replace_mathjax(opt_html)
                 opt_text = BeautifulSoup(cleaned_opt_html, "html.parser").get_text().strip()
                 opt_text = re.sub(r"\s+", " ", opt_text)
+                # Si HTML queda vacío (ej. solo imagen), usar el texto JS de la opción
+                if not opt_text and i < len(options_js):
+                    opt_text = options_js[i]
+                elif i < len(options_js):
+                    # Recuperar etiquetas [img: ...] del texto JS que BeautifulSoup no extrae
+                    js_opt_imgs = re.findall(r"\[img:\s*[^\]]+\]", options_js[i])
+                    if js_opt_imgs:
+                        opt_text = f"{opt_text} {' '.join(js_opt_imgs)}".strip()
                 if opt_text:
                     options.append(opt_text)
         else:
-            options = [str(o).strip() for o in data.get("options", []) if str(o).strip()]
+            options = [o for o in options_js if o]
 
         selectors = [str(s).strip() for s in data.get("selectors", []) if str(s).strip()]
         question_selector = str(data.get("question_selector", "")).strip()

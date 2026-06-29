@@ -97,6 +97,8 @@ def _load_autopilot_config() -> dict[str, Any]:
             "wait_for_manual_auth": True,
             "manual_auth_timeout_sec": 300,
             "manual_auth_poll_sec": 1.0,
+            "use_external_chrome_for_auth": True,
+            "chrome_executable": None,
         },
         "browser": {
             "keep_open": False,
@@ -1062,7 +1064,10 @@ class AutopilotRunner:
 
             return result
         except Exception as exc:
-            self._log(f"Error al extraer preguntas del DOM: {exc}", "ERROR")
+            # "Execution context was destroyed" es un estado transitorio normal durante
+            # navegación/recarga. Registrar como DEBUG para no alarmar al usuario.
+            level = "DEBUG" if "context" in str(exc).lower() else "ERROR"
+            self._log(f"Error al extraer preguntas del DOM: {exc}", level)
             return None
 
 
@@ -1073,12 +1078,30 @@ class AutopilotRunner:
     def _wait_for_manual_auth_and_questions(self) -> bool:
         if not self.auth_cfg.get("wait_for_manual_auth", True):
             return True
-        if not self.browser or not self.browser.page:
+        if not self.browser:
             return False
 
         timeout_sec = float(self.auth_cfg.get("manual_auth_timeout_sec", 300))
         poll_sec = max(float(self.auth_cfg.get("manual_auth_poll_sec", 1.0)), 0.2)
         started_at = time.monotonic()
+
+        if self.auth_cfg.get("use_external_chrome_for_auth", True) and not self.browser.page:
+            self._log(
+                "Chrome del sistema abierto para autenticación manual. Completa el login y luego confirma en la app.",
+                "INFO",
+            )
+            try:
+                self.browser.connect_to_existing_browser(
+                    url=self.url,
+                    timeout_ms=int(self.browser_cfg.get("pw_timeout_ms", 120000)),
+                )
+                self._log("Conectado a la sesión de Chrome existente por CDP.", "SUCCESS")
+            except Exception as exc:
+                self._log(f"No se pudo conectar a la sesión de Chrome existente: {exc}", "ERROR")
+                return False
+
+        if not self.browser.page:
+            return False
 
         self._log(
             "Navegador abierto. Autentícate manualmente y navega hasta la hoja de preguntas; "
@@ -1102,8 +1125,6 @@ class AutopilotRunner:
                 )
                 return False
 
-            # Esperar de forma dirigida: preferir wait_for_selector si hay página,
-            # sino usar wait_for_timeout como fallback y finalmente time.sleep.
             try:
                 if self.browser and self.browser.page:
                     sel = self.ap_cfg.get("selectors", {}).get("question_container")
@@ -1111,7 +1132,6 @@ class AutopilotRunner:
                         try:
                             self.browser.page.wait_for_selector(sel, timeout=int(poll_sec * 1000))
                         except Exception:
-                            # No encontrado en el tiempo dado, continuar el bucle.
                             pass
                     else:
                         try:
@@ -1121,7 +1141,6 @@ class AutopilotRunner:
                 else:
                     time.sleep(poll_sec)
             except Exception:
-                # En casos raros de error de Playwright, caer a sleep seguro.
                 time.sleep(poll_sec)
 
         return False
@@ -1460,6 +1479,10 @@ class AutopilotRunner:
                             self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
                         except Exception:
                             pass
+                        try:
+                            self.browser.page.wait_for_load_state("networkidle", timeout=10000)
+                        except Exception:
+                            pass
                     else:
                         time.sleep(wait_ms / 1000)
                 except Exception:
@@ -1477,6 +1500,10 @@ class AutopilotRunner:
                             pass
                         try:
                             self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                        except Exception:
+                            pass
+                        try:
+                            self.browser.page.wait_for_load_state("networkidle", timeout=10000)
                         except Exception:
                             pass
                     else:
@@ -1591,6 +1618,10 @@ class AutopilotRunner:
                             pass
                         try:
                             self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                        except Exception:
+                            pass
+                        try:
+                            self.browser.page.wait_for_load_state("networkidle", timeout=10000)
                         except Exception:
                             pass
                     else:
@@ -1991,9 +2022,18 @@ class AutopilotRunner:
             self._owned_browser = True
             if self.url:
                 try:
-                    self.browser.open(self.url, timeout_ms=self._pw_timeout_ms)
-                    opened_browser = True
-                    self._log(f"Navegador abierto en: {self.url}", "INFO")
+                    if self.auth_cfg.get("use_external_chrome_for_auth", True):
+                        self.browser.launch_external_browser(
+                            url=self.url,
+                            timeout_ms=self._pw_timeout_ms,
+                            executable=self.auth_cfg.get("chrome_executable"),
+                        )
+                        opened_browser = True
+                        self._log(f"Chrome del sistema abierto en: {self.url}", "INFO")
+                    else:
+                        self.browser.open(self.url, timeout_ms=self._pw_timeout_ms)
+                        opened_browser = True
+                        self._log(f"Navegador abierto en: {self.url}", "INFO")
                 except Exception as exc:
                     self._log(f"Error al abrir el navegador: {exc}", "ERROR")
                     self._shutdown()
@@ -2060,10 +2100,10 @@ class AutopilotRunner:
                     time.sleep(dom_wait_ms / 1000)
 
                 preguntas = None
-                question_load_timeout_ms = int(self.timings.get("question_load_timeout_ms", 20000))
-                deadline = time.monotonic() + (question_load_timeout_ms / 1000.0)
-                extract_attempt = 0
-                while time.monotonic() < deadline:
+                # Reintentar extracción hasta 6 veces si falla (ej: contexto destruido
+                # por navegación o página que tarda en cargar preguntas vía AJAX).
+                _MAX_EXTRACT_RETRIES = 6
+                for _extract_attempt in range(_MAX_EXTRACT_RETRIES):
                     try:
                         preguntas = self._extraer_todas_las_preguntas()
                         if preguntas:
@@ -2076,25 +2116,20 @@ class AutopilotRunner:
                         )
                         preguntas = None
 
-                    extract_attempt += 1
-                    if extract_attempt == 1:
-                        self._log(
-                            f"Hoja {hojas_procesadas}: no se detectaron preguntas aún. "
-                            f"Esperando hasta {question_load_timeout_ms / 1000:.0f}s antes de decidir.",
-                            "INFO",
-                        )
-
-                    wait_s = min(2 ** min(extract_attempt, 4), 4)
+                    # Espera progresiva: 1s, 2s, 4s, 4s, 4s, 4s
+                    _wait_s = min(2 ** _extract_attempt, 4)
                     try:
                         if self.browser and self.browser.page:
-                            sel = self.ap_cfg.get("selectors", {}).get("question_container")
-                            if sel:
-                                try:
-                                    self.browser.page.wait_for_selector(sel, timeout=int(wait_s * 1000))
-                                except Exception:
-                                    pass
-                            else:
-                                self.browser.page.wait_for_timeout(int(wait_s * 1000))
+                            try:
+                                self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                            except Exception:
+                                pass
+                            try:
+                                # Esperar networkidle para que AJAX termine de cargar preguntas
+                                self.browser.page.wait_for_load_state("networkidle", timeout=5000)
+                            except Exception:
+                                pass
+                            self.browser.page.wait_for_timeout(_wait_s * 1000)
                         else:
                             time.sleep(wait_s)
                     except Exception:
@@ -2233,7 +2268,10 @@ class AutopilotRunner:
                     continue
 
                 # ── D. Leer feedback del DOM ────────────────────────────────
-                fb_wait_ms = int(self.timings.get("feedback_wait_ms", 2500))
+                # Usar un tiempo de espera generoso para tolerar servidores lentos.
+                # _esperar_feedback_dom retorna en cuanto detecta marcadores en el DOM,
+                # por lo que el máximo de 15 s solo aplica si el servidor realmente tarda.
+                fb_wait_ms = max(int(self.timings.get("feedback_wait_ms", 2500)), 15000)
                 try:
                     self._esperar_feedback_dom(fb_wait_ms)
                 except Exception:
