@@ -91,6 +91,7 @@ def _load_autopilot_config() -> dict[str, Any]:
             "next_wait_ms": 2500,
             "dom_stable_wait_ms": 400,
             "after_submit_wait_ms": 2000,
+            "question_load_timeout_ms": 20000,
         },
         "auth": {
             "wait_for_manual_auth": True,
@@ -2109,8 +2110,8 @@ class AutopilotRunner:
                             break
                     except Exception as exc:
                         self._log(
-                            f"Error al extraer preguntas (intento {_extract_attempt + 1}/{_MAX_EXTRACT_RETRIES}): "
-                            f"{exc}. Esperando que la página estabilice...",
+                            f"Error al extraer preguntas (intento {extract_attempt + 1}): {exc}. "
+                            "Esperando que la página estabilice...",
                             "WARNING",
                         )
                         preguntas = None
@@ -2130,14 +2131,14 @@ class AutopilotRunner:
                                 pass
                             self.browser.page.wait_for_timeout(_wait_s * 1000)
                         else:
-                            time.sleep(_wait_s)
+                            time.sleep(wait_s)
                     except Exception:
-                        time.sleep(_wait_s)
+                        time.sleep(wait_s)
 
                 if not preguntas:
                     self._log(
                         f"Hoja {hojas_procesadas}: no se detectaron preguntas tras "
-                        f"{_MAX_EXTRACT_RETRIES} intentos. Intentando avanzar...",
+                        f"{question_load_timeout_ms / 1000:.0f}s de espera. Intentando avanzar...",
                         "WARNING",
                     )
                     hoja_sin_preguntas = True

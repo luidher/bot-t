@@ -326,6 +326,22 @@ class BotRunner:
         self.log("Buscando preguntas sin responder en el DOM...", "INFO")
         page_data = self.browser.read_page()
 
+        if not page_data and self.browser and self.browser.page:
+            self.log(
+                "No se detectaron preguntas sin responder en esta página. "
+                "Esperando carga de preguntas antes de intentar avanzar...",
+                "INFO",
+            )
+            question_wait_ms = int(self.config.get("question_load_timeout_ms", 15000))
+            try:
+                self.browser.page.wait_for_selector(
+                    'ul.form-items > li[data-type="OM"], ul.form-items > li[data-item], .form-items > li[data-type="OM"]',
+                    timeout=question_wait_ms,
+                )
+            except Exception:
+                pass
+            page_data = self.browser.read_page()
+
         if not page_data:
             self.log("No se detectaron preguntas sin responder en esta página.", "INFO")
             if self.config.get("auto_next", True):
