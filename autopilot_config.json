@@ -71,7 +71,8 @@
         "reload_wait_ms":      2000,
         "next_wait_ms":        2500,
         "dom_stable_wait_ms":  400,
-        "after_submit_wait_ms": 2000
+        "after_submit_wait_ms": 2000,
+        "question_load_timeout_ms": 20000
     },
     "auth": {
         "wait_for_manual_auth": true,
