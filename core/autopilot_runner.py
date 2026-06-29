@@ -1092,11 +1092,9 @@ class AutopilotRunner:
                 "Chrome del sistema abierto para autenticación manual. Completa el login y luego confirma en la app.",
                 "INFO",
             )
-            # Limpiar el evento de confirmación antes de esperar
-            self.browser.auth_confirmed_event.clear()
-            
-            # Invocar callback para abrir el diálogo modal (Widget)
+            # Limpiar el evento de confirmación antes de esperar si hay un callback de UI
             if self.auth_required_callback:
+                self.browser.auth_confirmed_event.clear()
                 self.auth_required_callback()
                 
             # Esperar a que la UI active el evento
