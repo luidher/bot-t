@@ -938,11 +938,13 @@ class AutopilotRunner:
         keep_browser_open: bool = False,
         browser: Optional["BotBrowser"] = None,
         bot_config: dict[str, Any] | None = None,
+        auth_required_callback: Callable[[], None] | None = None,
     ) -> None:
         self.url = url
         self.log_cb = log_callback or _default_log_callback
         self.stats_cb = stats_callback or (lambda _: None)
         self.keep_browser_open = keep_browser_open
+        self.auth_required_callback = auth_required_callback
 
         _cfg = bot_config or {}
         if hasattr(_cfg, "dict") and callable(getattr(_cfg, "dict")):
@@ -1090,10 +1092,25 @@ class AutopilotRunner:
                 "Chrome del sistema abierto para autenticación manual. Completa el login y luego confirma en la app.",
                 "INFO",
             )
+            # Limpiar el evento de confirmación antes de esperar
+            self.browser.auth_confirmed_event.clear()
+            
+            # Invocar callback para abrir el diálogo modal (Widget)
+            if self.auth_required_callback:
+                self.auth_required_callback()
+                
+            # Esperar a que la UI active el evento
+            confirmed = self.browser.auth_confirmed_event.wait(timeout=timeout_sec)
+            if not confirmed:
+                self._log(f"Tiempo de espera agotado ({timeout_sec:.0f}s) o cancelación. Deteniendo Autopilot.", "ERROR")
+                return False
+            if not self._running:
+                return False
+
             try:
                 self.browser.connect_to_existing_browser(
                     url=self.url,
-                    timeout_ms=int(self.browser_cfg.get("pw_timeout_ms", 120000)),
+                    timeout_ms=self._pw_timeout_ms,
                 )
                 self._log("Conectado a la sesión de Chrome existente por CDP.", "SUCCESS")
             except Exception as exc:
@@ -2041,7 +2058,12 @@ class AutopilotRunner:
             else:
                 self._log("No se proporcionó URL; asumiendo navegador ya en posición.", "WARNING")
 
-        if opened_browser and not self._wait_for_manual_auth_and_questions():
+        needs_cdp_connect = (
+            self.auth_cfg.get("use_external_chrome_for_auth", True)
+            and self.browser is not None
+            and self.browser.page is None
+        )
+        if (opened_browser or needs_cdp_connect) and not self._wait_for_manual_auth_and_questions():
             self._shutdown()
             return
 
@@ -2555,6 +2577,7 @@ if _HAS_PYQT:
         log_signal      = pyqtSignal(str, str)
         status_signal   = pyqtSignal(str)
         db_stats_signal = pyqtSignal(dict)
+        auth_required_signal = pyqtSignal()
 
         def __init__(
             self,
@@ -2577,6 +2600,7 @@ if _HAS_PYQT:
                 log_callback=lambda msg, lvl: self.log_signal.emit(msg, lvl),
                 stats_callback=lambda stats: self.db_stats_signal.emit(stats),
                 keep_browser_open=self._keep_browser_open,
+                auth_required_callback=lambda: self.auth_required_signal.emit(),
             )
             _backoff = 2
             while True:

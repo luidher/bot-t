@@ -354,9 +354,9 @@ class AutopilotApp:
         browser: BotBrowser | None = None
         try:
             browser = BotBrowser(headless=False, browser_type=self._var_browser_type.get())
-            browser.open(url, timeout_ms=120000)
+            browser.launch_external_browser(url, timeout_ms=120000)
             self._browser = browser
-            self._log_queue.put(("INFO", "Navegador abierto. Haz login y luego presiona 'Iniciar Autopilot'."))
+            self._log_queue.put(("INFO", "Navegador Chrome abierto para autenticación manual. Haz login y luego pulsa 'Iniciar Autopilot'."))
             self._ui_after(self._on_browser_ready)
 
             while True:
@@ -434,6 +434,9 @@ class AutopilotApp:
         self._btn_open.config(state="disabled")
         self._btn_select.config(state="disabled")
         self._set_status("● Ejecutando...", COLORS["accent"])
+
+        if self._browser:
+            self._browser.auth_confirmed_event.set()
 
         self._browser_cmd_queue.put("run")
 

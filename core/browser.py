@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from threading import Lock
+from threading import Lock, Event
 from typing import Any, Dict, List, Optional
 from urllib.request import Request, urlopen
 from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
@@ -48,6 +48,7 @@ class BotBrowser:
         self.page: Optional[Page] = None
         self._cdp_endpoint: Optional[str] = None
         self._external_browser_process: Optional[subprocess.Popen] = None
+        self.auth_confirmed_event = Event()
 
     def _resolve_chrome_executable(self, executable: Optional[str] = None) -> str:
         candidates: list[str] = []
@@ -147,10 +148,16 @@ class BotBrowser:
         assert self.page is not None
         self.page.set_default_timeout(timeout_ms)
         if url and self.page:
+            current_url = ""
             try:
-                self.page.goto(url, timeout=timeout_ms, wait_until="load")
+                current_url = self.page.url or ""
             except Exception:
                 pass
+            if current_url in ("", "about:blank"):
+                try:
+                    self.page.goto(url, timeout=timeout_ms, wait_until="load")
+                except Exception:
+                    pass
 
     def open(self, url: str, timeout_ms: int = 120000) -> None:
         """Launch browser and open the target URL."""

@@ -639,6 +639,7 @@ class VisionBotWidget(QWidget):
             self.autopilot_thread.log_signal.connect(self.on_runner_log)
             self.autopilot_thread.status_signal.connect(self.on_runner_status)
             self.autopilot_thread.db_stats_signal.connect(self.on_db_stats)
+            self.autopilot_thread.auth_required_signal.connect(self._show_auth_confirm_dialog)
             self.autopilot_thread.start()
             return
 
@@ -793,6 +794,125 @@ class VisionBotWidget(QWidget):
         else:
             self.lbl_db_status.setStyleSheet("color: #f7971e; font-weight: bold;")
             self.lbl_db_status.setToolTip("BD Autopilot vacía. Aprenderá en esta sesión.")
+
+    @pyqtSlot()
+    def _show_auth_confirm_dialog(self) -> None:
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QFrame
+        from PyQt5.QtCore import Qt
+
+        dlg = QDialog(self)
+        dlg.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Dialog)
+        dlg.setAttribute(Qt.WA_TranslucentBackground)
+        dlg.setModal(True)
+        dlg.setMinimumWidth(400)
+        dlg.setMinimumHeight(200)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(1, 1, 1, 1)
+
+        frame = QFrame(dlg)
+        frame.setObjectName("AuthFrame")
+        frame.setStyleSheet("""
+            QFrame#AuthFrame {
+                background-color: #121216;
+                border: 1px solid #8E2DE2;
+                border-radius: 12px;
+            }
+            QLabel {
+                color: #B3B3C2;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 11px;
+            }
+            QLabel#TitleLabel {
+                color: #FFFFFF;
+                font-size: 14px;
+                font-weight: bold;
+            }
+            QLabel#DescLabel {
+                font-size: 11px;
+            }
+            QPushButton {
+                background-color: #20202A;
+                border: 1px solid #2D2D38;
+                border-radius: 6px;
+                color: #E2E2E9;
+                padding: 8px 16px;
+                font-family: 'Segoe UI', sans-serif;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #2D2D3B;
+                border: 1px solid #3E3E52;
+            }
+            QPushButton#BtnConfirm {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #11998e, stop:1 #38ef7d);
+                color: #FFFFFF;
+                border: 0px;
+            }
+            QPushButton#BtnConfirm:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #12a89d, stop:1 #45f085);
+            }
+            QPushButton#BtnCancel {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #ff007f, stop:1 #ff416c);
+                color: #FFFFFF;
+                border: 0px;
+            }
+            QPushButton#BtnCancel:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #ff1a8c, stop:1 #ff577b);
+            }
+        """)
+
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(20, 20, 20, 20)
+        frame_layout.setSpacing(15)
+
+        title = QLabel("🔑 Autenticación Manual Requerida")
+        title.setObjectName("TitleLabel")
+        frame_layout.addWidget(title)
+
+        desc = QLabel(
+            "Se ha abierto Chrome para iniciar sesión.\n\n"
+            "1. Haz login en Google/plataforma en el navegador Chrome.\n"
+            "2. Navega hasta la hoja del cuestionario.\n"
+            "3. Haz clic en 'Confirmar' aquí abajo para conectar el bot."
+        )
+        desc.setObjectName("DescLabel")
+        desc.setWordWrap(True)
+        frame_layout.addWidget(desc)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
+        btn_confirm = QPushButton("Confirmar Inicio")
+        btn_confirm.setObjectName("BtnConfirm")
+        btn_confirm.setCursor(Qt.PointingHandCursor)
+        
+        btn_cancel = QPushButton("Cancelar")
+        btn_cancel.setObjectName("BtnCancel")
+        btn_cancel.setCursor(Qt.PointingHandCursor)
+
+        btn_layout.addWidget(btn_confirm)
+        btn_layout.addWidget(btn_cancel)
+        frame_layout.addLayout(btn_layout)
+
+        layout.addWidget(frame)
+
+        # Handlers
+        def on_confirm():
+            if self.autopilot_thread and self.autopilot_thread._runner and self.autopilot_thread._runner.browser:
+                self.autopilot_thread._runner.browser.auth_confirmed_event.set()
+            dlg.accept()
+
+        def on_cancel():
+            dlg.reject()
+            self.stop_bot()
+
+        btn_confirm.clicked.connect(on_confirm)
+        btn_cancel.clicked.connect(on_cancel)
+
+        dlg.rejected.connect(on_cancel)
+        dlg.exec_()
 
     def _refresh_db_indicator(self) -> None:
         """Consulta la BD para actualizar el indicador sin iniciar el bot."""
