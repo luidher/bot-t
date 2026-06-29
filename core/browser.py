@@ -51,22 +51,45 @@ class BotBrowser:
         self.auth_confirmed_event = Event()
 
     def _resolve_chrome_executable(self, executable: Optional[str] = None) -> str:
+        import os
+        import platform
+
         candidates: list[str] = []
         if executable:
             candidates.append(executable)
         candidates.extend(
             [
+                "chrome",
+                "chrome.exe",
                 "google-chrome",
                 "google-chrome-stable",
                 "chromium",
                 "chromium-browser",
-                "microsoft-edge",
                 "msedge",
+                "msedge.exe",
+                "microsoft-edge",
             ]
         )
         for candidate in candidates:
             if candidate and shutil.which(candidate):
                 return shutil.which(candidate)  # type: ignore[return-value]
+
+        if platform.system() == "Windows":
+            win_paths = [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+                os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+                os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"),
+                os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
+            ]
+            for path in win_paths:
+                if os.path.exists(path):
+                    return path
+
         raise FileNotFoundError(
             "No se encontró un ejecutable de Chrome/Chromium en el sistema. "
             "Instala Google Chrome o Chromium y vuelve a intentarlo."
