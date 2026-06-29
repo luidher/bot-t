@@ -221,5 +221,58 @@ class TestMathJaxParser(unittest.TestCase):
         self.assertEqual(parsed.question, "Check 2/4 here.")
         self.assertEqual(parsed.options, ["Option x^2", "Option B"])
 
+    def test_parse_mtable(self) -> None:
+        # 2x2 matrix: (a, b; c, d)
+        html = "<mtable><mtr><mtd><mi>a</mi></mtd><mtd><mi>b</mi></mtd></mtr><mtr><mtd><mi>c</mi></mtd><mtd><mi>d</mi></mtd></mtr></mtable>"
+        result = self.parser.parse_mathml(html)
+        self.assertEqual(result, "(a, b; c, d)")
+
+    def test_parse_mspace(self) -> None:
+        # mspace should produce a space between terms
+        html = "<mrow><mn>3</mn><mspace width='5px'/><mn>4</mn></mrow>"
+        result = self.parser.parse_mathml(html)
+        self.assertEqual(result, "3 4")
+
+    def test_parse_menclose(self) -> None:
+        # menclose without radical notation should return inner content
+        html = "<menclose notation='box'><mn>42</mn></menclose>"
+        result = self.parser.parse_mathml(html)
+        self.assertEqual(result, "42")
+
+        # menclose with radical notation should return sqrt form
+        html_rad = "<menclose notation='radical'><mn>9</mn></menclose>"
+        result_rad = self.parser.parse_mathml(html_rad)
+        self.assertEqual(result_rad, "sqrt(9)")
+
+    def test_from_dom_image_only_question(self) -> None:
+        """Pregunta cuyo HTML no tiene texto (solo imagen) usa el texto JS con [img: ...]."""
+        data = {
+            "question": "[img: BP3.png]",
+            "question_html": '<div class="material"><img src="https://cdn.pruebat.org/recursos/BP3.png" alt="Pregunta"></div>',
+            "options": ["[img: P3O1.png]", "[img: P3O2.png]"],
+            "options_html": [
+                '<label><input type="radio"><img src="https://cdn.pruebat.org/recursos/P3O1.png"></label>',
+                '<label><input type="radio"><img src="https://cdn.pruebat.org/recursos/P3O2.png"></label>',
+            ],
+            "selectors": ["#i1", "#i2"],
+        }
+        parsed = ParsedQuestion.from_dom(data)
+        # Texto de la pregunta debe contener el identificador de imagen
+        self.assertIn("[img:", parsed.question)
+        # Opciones tampoco deben quedar vacías
+        self.assertTrue(all("[img:" in o for o in parsed.options))
+
+    def test_from_dom_img_tag_preserved_alongside_text(self) -> None:
+        """Cuando la pregunta tiene texto + imagen, la etiqueta [img: ...] se conserva."""
+        data = {
+            "question": "¿Cuál es la figura? [img: tangram.png]",
+            "question_html": '<div><p>¿Cuál es la figura?</p><img src="tangram.png" alt="figura"></div>',
+            "options": [],
+            "options_html": [],
+        }
+        parsed = ParsedQuestion.from_dom(data)
+        self.assertIn("¿Cuál es la figura?", parsed.question)
+        self.assertIn("[img:", parsed.question)
+
 if __name__ == "__main__":
     unittest.main()

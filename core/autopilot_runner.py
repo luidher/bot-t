@@ -1063,7 +1063,10 @@ class AutopilotRunner:
 
             return result
         except Exception as exc:
-            self._log(f"Error al extraer preguntas del DOM: {exc}", "ERROR")
+            # "Execution context was destroyed" es un estado transitorio normal durante
+            # navegación/recarga. Registrar como DEBUG para no alarmar al usuario.
+            level = "DEBUG" if "context" in str(exc).lower() else "ERROR"
+            self._log(f"Error al extraer preguntas del DOM: {exc}", level)
             return None
 
 
@@ -1475,6 +1478,10 @@ class AutopilotRunner:
                             self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
                         except Exception:
                             pass
+                        try:
+                            self.browser.page.wait_for_load_state("networkidle", timeout=10000)
+                        except Exception:
+                            pass
                     else:
                         time.sleep(wait_ms / 1000)
                 except Exception:
@@ -1492,6 +1499,10 @@ class AutopilotRunner:
                             pass
                         try:
                             self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                        except Exception:
+                            pass
+                        try:
+                            self.browser.page.wait_for_load_state("networkidle", timeout=10000)
                         except Exception:
                             pass
                     else:
@@ -1606,6 +1617,10 @@ class AutopilotRunner:
                             pass
                         try:
                             self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                        except Exception:
+                            pass
+                        try:
+                            self.browser.page.wait_for_load_state("networkidle", timeout=10000)
                         except Exception:
                             pass
                     else:
@@ -2084,8 +2099,9 @@ class AutopilotRunner:
                     time.sleep(dom_wait_ms / 1000)
 
                 preguntas = None
-                # Reintentar extracción hasta 3 veces si falla (ej: contexto destruido por navegación)
-                _MAX_EXTRACT_RETRIES = 3
+                # Reintentar extracción hasta 6 veces si falla (ej: contexto destruido
+                # por navegación o página que tarda en cargar preguntas vía AJAX).
+                _MAX_EXTRACT_RETRIES = 6
                 for _extract_attempt in range(_MAX_EXTRACT_RETRIES):
                     try:
                         preguntas = self._extraer_todas_las_preguntas()
@@ -2099,11 +2115,19 @@ class AutopilotRunner:
                         )
                         preguntas = None
 
-                    # Espera progresiva: 1s, 2s, 4s
-                    _wait_s = 2 ** _extract_attempt
+                    # Espera progresiva: 1s, 2s, 4s, 4s, 4s, 4s
+                    _wait_s = min(2 ** _extract_attempt, 4)
                     try:
                         if self.browser and self.browser.page:
-                            self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                            try:
+                                self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
+                            except Exception:
+                                pass
+                            try:
+                                # Esperar networkidle para que AJAX termine de cargar preguntas
+                                self.browser.page.wait_for_load_state("networkidle", timeout=5000)
+                            except Exception:
+                                pass
                             self.browser.page.wait_for_timeout(_wait_s * 1000)
                         else:
                             time.sleep(_wait_s)
@@ -2243,7 +2267,10 @@ class AutopilotRunner:
                     continue
 
                 # ── D. Leer feedback del DOM ────────────────────────────────
-                fb_wait_ms = int(self.timings.get("feedback_wait_ms", 2500))
+                # Usar un tiempo de espera generoso para tolerar servidores lentos.
+                # _esperar_feedback_dom retorna en cuanto detecta marcadores en el DOM,
+                # por lo que el máximo de 15 s solo aplica si el servidor realmente tarda.
+                fb_wait_ms = max(int(self.timings.get("feedback_wait_ms", 2500)), 15000)
                 try:
                     self._esperar_feedback_dom(fb_wait_ms)
                 except Exception:

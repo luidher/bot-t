@@ -309,6 +309,32 @@ class MathJaxParser:
                 return element.get_text().strip()
             return ""
 
+        elif tag == "mtable":
+            # Tabla/Matriz: cada fila separada por "; "
+            rows = [self._parse_element(c) for c in children]
+            return "(" + "; ".join(r for r in rows if r.strip()) + ")"
+
+        elif tag == "mtr":
+            # Fila de tabla: celdas separadas por ", "
+            cells = [self._parse_element(c) for c in children]
+            return ", ".join(c for c in cells if c.strip())
+
+        elif tag == "mtd":
+            # Celda de tabla: contenido normal
+            return "".join(self._parse_element(c) for c in children)
+
+        elif tag == "mspace":
+            # Espacio matemático
+            return " "
+
+        elif tag == "menclose":
+            # Notación envolvente (cuadro, círculo, etc.)
+            content = "".join(self._parse_element(c) for c in children)
+            notation = element.get("notation", "")
+            if "radical" in notation:
+                return f"sqrt({content})" if self._is_simple(content) else f"\\sqrt{{{content}}}"
+            return content
+
         # Default fallback: parse children if any, otherwise return text
         if children:
             return "".join(self._parse_element(c) for c in children)

@@ -231,31 +231,89 @@ class BotBrowser:
             let targetContainer = null;
             let isFallback = false;
 
+            // Helper para extraer identificador textual de una imagen
+            const getImgIdentifier = (img) => {
+                const srcAttr = (img.tagName && img.tagName.toLowerCase() === 'img')
+                    ? (img.getAttribute('src') || '') : '';
+                let imgId = '';
+                if (srcAttr) {
+                    if (srcAttr.startsWith('data:')) {
+                        const mimeMatch = srcAttr.match(/data:image\/([a-zA-Z0-9+]+);/);
+                        const ext = mimeMatch ? mimeMatch[1] : 'png';
+                        let hash = 0;
+                        for (let i = 0; i < srcAttr.length; i++) {
+                            hash = (hash << 5) - hash + srcAttr.charCodeAt(i);
+                            hash |= 0;
+                        }
+                        imgId = `data_uri_${Math.abs(hash)}.${ext}`;
+                    } else {
+                        const parts = srcAttr.split('?')[0].split('/');
+                        imgId = parts[parts.length - 1] || srcAttr;
+                    }
+                }
+                const alt = (img.getAttribute && (img.getAttribute('alt') || img.getAttribute('title') || img.getAttribute('aria-label'))) || '';
+                const altClean = alt.trim().replace(/\s+/g, ' ');
+                if (imgId && altClean && altClean.toLowerCase() !== 'pregunta' && altClean.toLowerCase() !== 'imagen') {
+                    return `${imgId} - ${altClean}`;
+                } else if (imgId) {
+                    return imgId;
+                } else if (altClean) {
+                    return altClean;
+                }
+                return '';
+            };
+
             const getQuestionData = (container) => {
                 const qEl = container.querySelector('.question, .pregunta');
+                let text = '';
+                let html = '';
                 if (qEl) {
                     // Clonar y eliminar la lista de opciones para no incluir su texto
                     const clone = qEl.cloneNode(true);
                     clone.querySelectorAll('.form-list, .options-list, ul').forEach(el => el.remove());
-                    return {
-                        text: (clone.innerText || "").replace(/\s+/g, " ").trim(),
-                        html: qEl.outerHTML
-                    };
+                    text = (clone.innerText || '').replace(/\s+/g, ' ').trim();
+                    html = qEl.outerHTML;
+                } else {
+                    const pEl = container.querySelector('p, h2, h3, h4');
+                    if (pEl) {
+                        text = (pEl.innerText || '').replace(/\s+/g, ' ').trim();
+                        html = pEl.outerHTML;
+                    } else {
+                        // Fallback: container sin opciones
+                        const clone = container.cloneNode(true);
+                        clone.querySelectorAll('.form-list, .options-list, ul').forEach(el => el.remove());
+                        text = (clone.innerText || '').replace(/\s+/g, ' ').trim();
+                        html = container.outerHTML;
+                    }
                 }
-                const pEl = container.querySelector('p, h2, h3, h4');
-                if (pEl) {
-                    return {
-                        text: (pEl.innerText || "").replace(/\s+/g, " ").trim(),
-                        html: pEl.outerHTML
-                    };
-                }
-                // Fallback: container sin opciones
-                const clone = container.cloneNode(true);
-                clone.querySelectorAll('.form-list, .options-list, ul').forEach(el => el.remove());
-                return {
-                    text: (clone.innerText || "").replace(/\s+/g, " ").trim(),
-                    html: container.outerHTML
-                };
+
+                // Agregar identificadores de imagenes de la pregunta (excluyendo las que
+                // están dentro de las opciones de respuesta)
+                try {
+                    const srcEl = qEl || container;
+                    const imgs = Array.from(srcEl.querySelectorAll('img, svg, canvas'));
+                    const imgTags = [];
+                    for (const img of imgs) {
+                        // Verificar que no esté dentro de un label/input (opcion)
+                        let insideOption = false;
+                        let p = img.parentElement;
+                        while (p && p !== srcEl) {
+                            if (p.tagName === 'LABEL' || p.querySelector('input[type="radio"], input[type="checkbox"]')) {
+                                insideOption = true;
+                                break;
+                            }
+                            p = p.parentElement;
+                        }
+                        if (insideOption) continue;
+                        const id = getImgIdentifier(img);
+                        if (id) imgTags.push(`[img: ${id}]`);
+                    }
+                    if (imgTags.length > 0) {
+                        text = text ? `${text} ${imgTags.join(' ')}` : imgTags.join(' ');
+                    }
+                } catch (_) {}
+
+                return { text, html };
             };
 
             // ── Buscar primer contenedor sin responder ──────────────────────
@@ -411,6 +469,24 @@ class BotBrowser:
                 }
 
                 labelText = labelText.trim();
+
+                // Agregar identificadores de imagenes dentro de la opción
+                try {
+                    const optRoot = optionElement || input.parentElement || input;
+                    const optImgs = Array.from(optRoot.querySelectorAll('img, svg, canvas'));
+                    const optImgTags = [];
+                    for (const img of optImgs) {
+                        const id = getImgIdentifier(img);
+                        if (id) optImgTags.push(`[img: ${id}]`);
+                    }
+                    if (optImgTags.length > 0) {
+                        labelText = labelText ? `${labelText} ${optImgTags.join(' ')}` : optImgTags.join(' ');
+                    }
+                } catch (_) {}
+
+                // Fallback si el texto sigue vacio
+                if (!labelText) labelText = `Opción ${options.length + 1}`;
+
                 options.push(labelText);
                 optionsHtml.push(labelHtml);
                 selectors.push(getUniqueSelector(input));

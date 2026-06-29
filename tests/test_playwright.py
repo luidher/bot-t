@@ -48,8 +48,8 @@ class PlaywrightTests(unittest.TestCase):
 
         parsed = ParsedQuestion.from_dom(data)
 
-        # Verify question and options
-        self.assertEqual(parsed.question, "Juan tiene _____ libros.")
+        # Verify question text (may also include [img: ...] tags from images in the question)
+        self.assertIn("Juan tiene _____ libros.", parsed.question)
         self.assertEqual(len(parsed.options), 4)
         self.assertEqual(parsed.options[0], "28 libros")
         self.assertEqual(parsed.options[1], "25 libros")
@@ -85,7 +85,8 @@ class PlaywrightTests(unittest.TestCase):
         assert data2 is not None
         parsed2 = ParsedQuestion.from_dom(data2)
 
-        self.assertEqual(parsed2.question, "En el siguiente estanque hay ________ peces.")
+        # Texto de la segunda pregunta puede incluir [img: ...] si la pregunta tiene imágenes
+        self.assertIn("En el siguiente estanque hay ________ peces.", parsed2.question)
         self.assertEqual(parsed2.options[0], "18")
         self.assertEqual(parsed2.options[1], "13")
 
