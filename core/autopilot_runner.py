@@ -91,6 +91,7 @@ def _load_autopilot_config() -> dict[str, Any]:
             "next_wait_ms": 2500,
             "dom_stable_wait_ms": 400,
             "after_submit_wait_ms": 2000,
+            "question_load_timeout_ms": 20000,
         },
         "auth": {
             "wait_for_manual_auth": True,
@@ -2059,36 +2060,50 @@ class AutopilotRunner:
                     time.sleep(dom_wait_ms / 1000)
 
                 preguntas = None
-                # Reintentar extracción hasta 3 veces si falla (ej: contexto destruido por navegación)
-                _MAX_EXTRACT_RETRIES = 3
-                for _extract_attempt in range(_MAX_EXTRACT_RETRIES):
+                question_load_timeout_ms = int(self.timings.get("question_load_timeout_ms", 20000))
+                deadline = time.monotonic() + (question_load_timeout_ms / 1000.0)
+                extract_attempt = 0
+                while time.monotonic() < deadline:
                     try:
                         preguntas = self._extraer_todas_las_preguntas()
                         if preguntas:
                             break
                     except Exception as exc:
                         self._log(
-                            f"Error al extraer preguntas (intento {_extract_attempt + 1}/{_MAX_EXTRACT_RETRIES}): "
-                            f"{exc}. Esperando que la página estabilice...",
+                            f"Error al extraer preguntas (intento {extract_attempt + 1}): {exc}. "
+                            "Esperando que la página estabilice...",
                             "WARNING",
                         )
                         preguntas = None
 
-                    # Espera progresiva: 1s, 2s, 4s
-                    _wait_s = 2 ** _extract_attempt
+                    extract_attempt += 1
+                    if extract_attempt == 1:
+                        self._log(
+                            f"Hoja {hojas_procesadas}: no se detectaron preguntas aún. "
+                            f"Esperando hasta {question_load_timeout_ms / 1000:.0f}s antes de decidir.",
+                            "INFO",
+                        )
+
+                    wait_s = min(2 ** min(extract_attempt, 4), 4)
                     try:
                         if self.browser and self.browser.page:
-                            self.browser.page.wait_for_load_state("load", timeout=self._pw_timeout_ms)
-                            self.browser.page.wait_for_timeout(_wait_s * 1000)
+                            sel = self.ap_cfg.get("selectors", {}).get("question_container")
+                            if sel:
+                                try:
+                                    self.browser.page.wait_for_selector(sel, timeout=int(wait_s * 1000))
+                                except Exception:
+                                    pass
+                            else:
+                                self.browser.page.wait_for_timeout(int(wait_s * 1000))
                         else:
-                            time.sleep(_wait_s)
+                            time.sleep(wait_s)
                     except Exception:
-                        time.sleep(_wait_s)
+                        time.sleep(wait_s)
 
                 if not preguntas:
                     self._log(
                         f"Hoja {hojas_procesadas}: no se detectaron preguntas tras "
-                        f"{_MAX_EXTRACT_RETRIES} intentos. Intentando avanzar...",
+                        f"{question_load_timeout_ms / 1000:.0f}s de espera. Intentando avanzar...",
                         "WARNING",
                     )
                     hoja_sin_preguntas = True

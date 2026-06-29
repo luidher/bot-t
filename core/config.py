@@ -56,6 +56,7 @@ class BotConfig(BaseModel):
     max_pages: int = Field(default=50, ge=1)
     auto_next: bool = True
     next_wait_sec: float = Field(default=2.0, ge=0.0, le=60.0)
+    question_load_timeout_ms: int = Field(default=15000, ge=0)
 
     # Playwright settings
     pw_timeout_ms: int = Field(default=60000, ge=0)
@@ -170,6 +171,7 @@ class BotConfigUpdate(BaseModel):
     max_pages: Optional[int] = Field(default=None, ge=1)
     auto_next: Optional[bool] = None
     next_wait_sec: Optional[float] = Field(default=None, ge=0.0, le=60.0)
+    question_load_timeout_ms: Optional[int] = Field(default=None, ge=0)
 
     # Playwright settings
     pw_timeout_ms: Optional[int] = Field(default=None, ge=0)
