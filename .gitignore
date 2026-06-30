@@ -33,3 +33,4 @@ web_config.json
 .env.*
 .vscode/
 .idea/
+tmp/
